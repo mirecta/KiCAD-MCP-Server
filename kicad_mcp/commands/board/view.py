@@ -1,0 +1,246 @@
+"""
+Board view command implementations for KiCAD interface
+"""
+
+import base64
+import io
+import logging
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
+import pcbnew
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+
+class BoardViewCommands:
+    """Handles board viewing operations"""
+
+    def __init__(self, board: Optional[pcbnew.BOARD] = None):
+        """Initialize with optional board instance"""
+        self.board = board
+
+    def get_board_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get information about the current board"""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            # Get board dimensions
+            board_box = self.board.GetBoardEdgesBoundingBox()
+            width_nm = board_box.GetWidth()
+            height_nm = board_box.GetHeight()
+
+            # Convert to mm
+            width_mm = width_nm / 1000000
+            height_mm = height_nm / 1000000
+
+            # Get layer information
+            layers = []
+            for layer_id in range(pcbnew.PCB_LAYER_ID_COUNT):
+                if self.board.IsLayerEnabled(layer_id):
+                    layers.append(
+                        {
+                            "name": self.board.GetLayerName(layer_id),
+                            "type": self._get_layer_type_name(self.board.GetLayerType(layer_id)),
+                            "id": layer_id,
+                        }
+                    )
+
+            return {
+                "success": True,
+                "board": {
+                    "filename": self.board.GetFileName(),
+                    "size": {"width": width_mm, "height": height_mm, "unit": "mm"},
+                    "layers": layers,
+                    "title": self.board.GetTitleBlock().GetTitle(),
+                    # Note: activeLayer removed - GetActiveLayer() doesn't exist in KiCAD 9.0
+                    # Active layer is a UI concept not applicable to headless scripting
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting board info: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get board information",
+                "errorDetails": str(e),
+            }
+
+    def get_board_2d_view(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get a 2D image of the PCB.
+
+        responseMode controls how the image is returned:
+        - "inline" (default): image bytes are base64-encoded and returned as ``imageData``.
+        - "file": image is written next to the .kicad_pcb file and ``filePath`` is returned.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            # Get parameters
+            width = params.get("width", 800)
+            height = params.get("height", 600)
+            format = params.get("format", "png")
+            layers = params.get("layers", [])
+            response_mode = params.get("responseMode", "inline")
+
+            # Create plot controller
+            plotter = pcbnew.PLOT_CONTROLLER(self.board)
+
+            # Set up plot options
+            plot_opts = plotter.GetPlotOptions()
+            plot_opts.SetOutputDirectory(os.path.dirname(self.board.GetFileName()))
+            plot_opts.SetScale(1)
+            plot_opts.SetMirror(False)
+            # Note: SetExcludeEdgeLayer() removed in KiCAD 9.0 - default behavior includes all layers
+            plot_opts.SetPlotFrameRef(False)
+            plot_opts.SetPlotValue(True)
+            plot_opts.SetPlotReference(True)
+
+            # Plot to SVG first (for vector output)
+            # Note: KiCAD 9.0 prepends the project name to the filename, so we use GetPlotFileName() to get the actual path
+            plotter.OpenPlotfile("temp_view", pcbnew.PLOT_FORMAT_SVG, "Temporary View")
+
+            # Plot specified layers or all enabled layers
+            # Note: In KiCAD 9.0, SetLayer() must be called before PlotLayer()
+            if layers:
+                for layer_name in layers:
+                    layer_id = self.board.GetLayerID(layer_name)
+                    if layer_id >= 0 and self.board.IsLayerEnabled(layer_id):
+                        plotter.SetLayer(layer_id)
+                        plotter.PlotLayer()
+            else:
+                for layer_id in range(pcbnew.PCB_LAYER_ID_COUNT):
+                    if self.board.IsLayerEnabled(layer_id):
+                        plotter.SetLayer(layer_id)
+                        plotter.PlotLayer()
+
+            # Get the actual filename that was created (includes project name prefix)
+            temp_svg = plotter.GetPlotFileName()
+
+            plotter.ClosePlot()
+
+            # Determine output path next to the PCB file
+            board_dir = os.path.dirname(self.board.GetFileName())
+            board_name = os.path.splitext(os.path.basename(self.board.GetFileName()))[0]
+
+            # --- Render to bytes (shared for both response modes) ---
+            if format == "svg":
+                with open(temp_svg, "rb") as f:
+                    image_bytes = f.read()
+                os.remove(temp_svg)
+                mime_format = "svg"
+            else:
+                from cairosvg import svg2png
+
+                image_bytes = svg2png(url=temp_svg, output_width=width, output_height=height)
+                os.remove(temp_svg)
+
+                if format == "jpg":
+                    img = Image.open(io.BytesIO(image_bytes))
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="JPEG")
+                    image_bytes = buf.getvalue()
+                mime_format = format
+
+            # --- Package response according to responseMode ---
+            if response_mode == "file":
+                output_path = os.path.join(board_dir, f"{board_name}_2d_view.{mime_format}")
+                with open(output_path, "wb") as f:
+                    f.write(image_bytes)
+                return {
+                    "success": True,
+                    "format": mime_format,
+                    "filePath": output_path,
+                    "message": f"2D view saved to {output_path}",
+                }
+            else:
+                # inline mode: base64-encode and return imageData
+                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                return {
+                    "success": True,
+                    "format": mime_format,
+                    "imageData": image_b64,
+                }
+
+        except Exception as e:
+            logger.error(f"Error getting board 2D view: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get board 2D view",
+                "errorDetails": str(e),
+            }
+
+    def _get_layer_type_name(self, type_id: int) -> str:
+        """Convert KiCAD layer type constant to name"""
+        type_map = {
+            pcbnew.LT_SIGNAL: "signal",
+            pcbnew.LT_POWER: "power",
+            pcbnew.LT_MIXED: "mixed",
+            pcbnew.LT_JUMPER: "jumper",
+        }
+        # Note: LT_USER was removed in KiCAD 9.0
+        return type_map.get(type_id, "unknown")
+
+    def get_board_extents(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the bounding box extents of the board"""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            # Get unit preference (default to mm)
+            unit = params.get("unit", "mm")
+            scale = (
+                1000000 if unit == "mm" else (25400 if unit == "mil" else 25400000)
+            )  # mm, mil, or inch to nm
+
+            # Get board bounding box
+            board_box = self.board.GetBoardEdgesBoundingBox()
+
+            # Extract bounds in nanometers, then convert
+            left = board_box.GetLeft() / scale
+            top = board_box.GetTop() / scale
+            right = board_box.GetRight() / scale
+            bottom = board_box.GetBottom() / scale
+            width = board_box.GetWidth() / scale
+            height = board_box.GetHeight() / scale
+
+            # Get center point
+            center_x = board_box.GetCenter().x / scale
+            center_y = board_box.GetCenter().y / scale
+
+            return {
+                "success": True,
+                "extents": {
+                    "left": left,
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "width": width,
+                    "height": height,
+                    "center": {"x": center_x, "y": center_y},
+                    "unit": unit,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting board extents: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get board extents",
+                "errorDetails": str(e),
+            }
