@@ -492,31 +492,91 @@ class KiCADDispatcher:
 
     def _handle_download_jlcpcb_database(self, params: Dict) -> Dict:
         try:
-            return self.jlcpcb_parts_manager.download_database(params)
+            output_path = params.get("outputPath")
+            force = bool(params.get("force", False))
+            source = (params.get("source") or "jlcsearch").lower()
+            if output_path:
+                from kicad_mcp.commands.jlcpcb_parts import JLCPCBPartsManager
+                self.jlcpcb_parts_manager = JLCPCBPartsManager(db_path=output_path)
+            if not force:
+                existing = self.jlcpcb_parts_manager.get_database_stats()
+                if existing.get("total_parts", 0) > 0:
+                    return {"success": True,
+                            "message": "Database already populated; pass force=true to re-download",
+                            "stats": existing}
+
+            if source == "official":
+                parts = self.jlcpcb_client.download_full_database()
+                self.jlcpcb_parts_manager.import_parts(parts)
+                imported = len(parts)
+            elif source == "jlcsearch":
+                from kicad_mcp.commands.jlcsearch import JLCSearchClient
+                client = JLCSearchClient()
+                parts = client.download_all_components()
+                self.jlcpcb_parts_manager.import_jlcsearch_parts(parts)
+                imported = len(parts)
+            elif source == "sqlite":
+                from kicad_mcp.commands.sqlite_loader import SqliteBulkLoader
+                loader = SqliteBulkLoader(self.jlcpcb_parts_manager)
+                result = loader.download_and_import(
+                    url=params.get("sqliteUrl"),
+                    table=params.get("sqliteTable"),
+                    keep_file_at=params.get("keepSqliteAt"),
+                )
+                if not result.get("success"):
+                    return result
+                imported = result.get("imported_rows", 0)
+            else:
+                return {"success": False,
+                        "error": f"Unknown source '{source}'. Use 'jlcsearch', 'sqlite', or 'official'."}
+
+            return {"success": True, "source": source,
+                    "message": f"Imported {imported} parts via {source}",
+                    "stats": self.jlcpcb_parts_manager.get_database_stats()}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
     def _handle_search_jlcpcb_parts(self, params: Dict) -> Dict:
         try:
-            return self.jlcpcb_parts_manager.search_parts(params)
+            parts = self.jlcpcb_parts_manager.search_parts(
+                query=params.get("query"),
+                category=params.get("category"),
+                package=params.get("package"),
+                library_type="Basic" if params.get("basic") else params.get("libraryType"),
+                manufacturer=params.get("manufacturer"),
+                in_stock=bool(params.get("inStock", True)),
+                limit=int(params.get("limit", 20)),
+            )
+            return {"success": True, "parts": parts, "count": len(parts)}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
     def _handle_get_jlcpcb_part(self, params: Dict) -> Dict:
         try:
-            return self.jlcpcb_parts_manager.get_part(params)
+            part_number = params.get("partNumber") or params.get("lcsc")
+            if not part_number:
+                return {"success": False, "error": "partNumber required"}
+            part = self.jlcpcb_parts_manager.get_part_info(part_number)
+            if part is None:
+                return {"success": False, "error": f"Part not found: {part_number}"}
+            return {"success": True, "part": part}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
     def _handle_get_jlcpcb_database_stats(self, params: Dict) -> Dict:
         try:
-            return self.jlcpcb_parts_manager.get_stats(params)
+            return {"success": True, "stats": self.jlcpcb_parts_manager.get_database_stats()}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
     def _handle_suggest_jlcpcb_alternatives(self, params: Dict) -> Dict:
         try:
-            return self.jlcpcb_parts_manager.suggest_alternatives(params)
+            reference = params.get("reference") or params.get("partNumber")
+            if not reference:
+                return {"success": False, "error": "reference required"}
+            limit = int(params.get("limit", 5))
+            alternatives = self.jlcpcb_parts_manager.suggest_alternatives(reference, limit=limit)
+            return {"success": True, "alternatives": alternatives, "count": len(alternatives)}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
@@ -660,7 +720,43 @@ class KiCADDispatcher:
             return {"success": False, "error": str(exc)}
 
     def _handle_delete_schematic_component(self, params: Dict) -> Dict:
-        return self._sch_delegate(["delete_component"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        reference = params.get("reference")
+        if not reference:
+            return {"success": False, "error": "reference required"}
+        try:
+            import sexpdata
+            from sexpdata import Symbol
+            content = sch_file.read_text(encoding="utf-8")
+            sch_data = sexpdata.loads(content)
+            _SYM = Symbol("symbol")
+            _PROP = Symbol("property")
+            _REF_KEY = "Reference"
+            removed = 0
+            new_data = [sch_data[0]]  # preserve top-level symbol name
+            for item in sch_data[1:]:
+                if isinstance(item, list) and item and item[0] == _SYM:
+                    # Check if this symbol has a Reference property matching
+                    for sub in item[1:]:
+                        if (isinstance(sub, list) and len(sub) >= 3
+                                and sub[0] == _PROP
+                                and str(sub[1]).strip('"') == _REF_KEY
+                                and str(sub[2]).strip('"').rstrip("_") == reference):
+                            removed += 1
+                            break
+                    else:
+                        new_data.append(item)
+                        continue
+                    continue  # skip this symbol
+                new_data.append(item)
+            if removed == 0:
+                return {"success": False, "error": f"Component {reference} not found"}
+            sch_file.write_text(sexpdata.dumps(new_data), encoding="utf-8")
+            return {"success": True, "reference": reference, "removed": removed}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_edit_schematic_component(self, params: Dict) -> Dict:
         return self._sch_delegate(["edit_component"], params)
@@ -680,13 +776,53 @@ class KiCADDispatcher:
         sch_file = self._resolve_sch_path(params)
         if not sch_file:
             return {"success": False, "error": "No schematic loaded."}
-        waypoints = params.get("waypoints") or []
-        if len(waypoints) < 2:
-            return {"success": False, "error": "waypoints requires at least 2 [x,y] points"}
-        try:
-            pts = [[float(p[0]), float(p[1])] for p in waypoints]
-        except (TypeError, ValueError, IndexError) as exc:
-            return {"success": False, "error": f"invalid waypoints: {exc}"}
+
+        from_ref = params.get("fromRef")
+        from_pin = params.get("fromPin")
+        to_ref = params.get("toRef")
+        to_pin = params.get("toPin")
+        via_points = params.get("via") or []  # optional intermediate waypoints
+
+        if from_ref and from_pin is not None and to_ref and to_pin is not None:
+            # Reference-based mode: resolve pin coordinates automatically
+            try:
+                from kicad_mcp.commands.pin_locator import PinLocator
+                locator = PinLocator()
+                start = locator.get_pin_location(sch_file, from_ref, str(from_pin))
+                if start is None:
+                    return {"success": False,
+                            "error": f"Pin {from_ref}/{from_pin} not found in schematic"}
+                end = locator.get_pin_location(sch_file, to_ref, str(to_pin))
+                if end is None:
+                    return {"success": False,
+                            "error": f"Pin {to_ref}/{to_pin} not found in schematic"}
+            except Exception as exc:
+                logger.exception("pin lookup failed in add_schematic_wire")
+                return {"success": False, "error": f"pin lookup failed: {exc}"}
+
+            try:
+                via_pts = [[float(p[0]), float(p[1])] for p in via_points]
+            except (TypeError, ValueError, IndexError) as exc:
+                return {"success": False, "error": f"invalid via waypoints: {exc}"}
+
+            pts = [start] + via_pts + [end]
+            resolved_pins = {
+                "from": {"ref": from_ref, "pin": str(from_pin), "position": start},
+                "to":   {"ref": to_ref,   "pin": str(to_pin),   "position": end},
+            }
+        else:
+            # Coordinate-based mode (original API)
+            waypoints = params.get("waypoints") or []
+            if len(waypoints) < 2:
+                return {"success": False,
+                        "error": "Provide either fromRef/fromPin/toRef/toPin, "
+                                 "or waypoints with at least 2 [x,y] points"}
+            try:
+                pts = [[float(p[0]), float(p[1])] for p in waypoints]
+            except (TypeError, ValueError, IndexError) as exc:
+                return {"success": False, "error": f"invalid waypoints: {exc}"}
+            resolved_pins = None
+
         try:
             from kicad_mcp.commands.wire_manager import WireManager
             if len(pts) == 2:
@@ -695,7 +831,10 @@ class KiCADDispatcher:
                 ok = WireManager.add_polyline_wire(sch_file, pts)
             if not ok:
                 return {"success": False, "error": "WireManager add_wire returned False"}
-            return {"success": True, "waypoints": pts, "schematic": str(sch_file)}
+            result: Dict = {"success": True, "waypoints": pts, "schematic": str(sch_file)}
+            if resolved_pins:
+                result["resolved_pins"] = resolved_pins
+            return result
         except Exception as exc:
             logger.exception("add_schematic_wire failed")
             return {"success": False, "error": str(exc)}
@@ -850,13 +989,67 @@ class KiCADDispatcher:
         return self._sch_delegate(["move_net_label"], params)
 
     def _handle_list_schematic_components(self, params: Dict) -> Dict:
-        return self._sch_delegate(["list_components"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        try:
+            import sexpdata
+            from sexpdata import Symbol
+            content = sch_file.read_text(encoding="utf-8")
+            sch_data = sexpdata.loads(content)
+            _SYM = Symbol("symbol")
+            _PROP = Symbol("property")
+            filt = params.get("filter", "")
+            components = []
+            for item in sch_data[1:]:
+                if not (isinstance(item, list) and item and item[0] == _SYM):
+                    continue
+                ref = val = lib_id = ""
+                x = y = 0.0
+                for sub in item[1:]:
+                    if not isinstance(sub, list) or not sub:
+                        continue
+                    if sub[0] == _PROP and len(sub) >= 3:
+                        key = str(sub[1]).strip('"')
+                        v = str(sub[2]).strip('"')
+                        if key == "Reference":
+                            ref = v.rstrip("_")
+                        elif key == "Value":
+                            val = v
+                    elif sub[0] == Symbol("lib_id") and len(sub) >= 2:
+                        lib_id = str(sub[1]).strip('"')
+                    elif sub[0] == Symbol("at") and len(sub) >= 3:
+                        x, y = float(sub[1]), float(sub[2])
+                if ref and (not filt or ref.startswith(filt)):
+                    components.append({"reference": ref, "value": val,
+                                       "lib_id": lib_id, "x": x, "y": y})
+            return {"success": True, "components": components, "count": len(components)}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_list_schematic_nets(self, params: Dict) -> Dict:
         return self._sch_delegate(["list_nets"], params)
 
     def _handle_list_schematic_wires(self, params: Dict) -> Dict:
-        return self._sch_delegate(["list_wires"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        try:
+            from kicad_mcp.commands.wire_manager import WireManager
+            import sexpdata
+            from sexpdata import Symbol
+            content = sch_file.read_text(encoding="utf-8")
+            sch_data = sexpdata.loads(content)
+            wires = []
+            for item in sch_data[1:]:
+                parsed = WireManager._parse_wire(item)
+                if parsed:
+                    (x1, y1), (x2, y2), w, t = parsed
+                    wires.append({"start": [x1, y1], "end": [x2, y2],
+                                  "stroke_width": w, "stroke_type": t})
+            return {"success": True, "wires": wires, "count": len(wires)}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_list_schematic_labels(self, params: Dict) -> Dict:
         return self._sch_delegate(["list_labels"], params)
@@ -865,7 +1058,28 @@ class KiCADDispatcher:
         return self._sch_delegate(["list_texts"], params)
 
     def _handle_get_schematic_view(self, params: Dict) -> Dict:
-        return self._sch_delegate(["get_view"], params)
+        sch_path = self._sch_path_from_params(params)
+        if not sch_path:
+            return {"success": False, "error": "No schematic loaded"}
+        try:
+            import base64, subprocess, tempfile
+            fmt = params.get("format", "png").lower()
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, f"view.{fmt}")
+                cmd = ["kicad-cli", "sch", "export", fmt, "-o", out, sch_path]
+                r = subprocess.run(cmd, capture_output=True, timeout=30)
+                if r.returncode != 0 or not os.path.exists(out):
+                    return {"success": False, "error": r.stderr.decode()[:500]}
+                data = open(out, "rb").read()
+                if params.get("responseMode") == "inline":
+                    return {"success": True, "format": fmt,
+                            "data": base64.b64encode(data).decode()}
+                save_to = params.get("outputPath", out)
+                with open(save_to, "wb") as fh:
+                    fh.write(data)
+                return {"success": True, "format": fmt, "path": save_to}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_export_schematic_pdf(self, params: Dict) -> Dict:
         return self._sch_delegate(["export_pdf"], params)
@@ -887,7 +1101,24 @@ class KiCADDispatcher:
         return self._sch_delegate(["connect_passthrough"], params)
 
     def _handle_get_schematic_pin_locations(self, params: Dict) -> Dict:
-        return self._sch_delegate(["get_pin_locations"], params)
+        sch_path = self._sch_path_from_params(params)
+        if not sch_path:
+            return {"success": False, "error": "No schematic loaded"}
+        reference = params.get("reference")
+        if not reference:
+            return {"success": False, "error": "reference required"}
+        try:
+            from pathlib import Path
+            from kicad_mcp.commands.pin_locator import PinLocator
+            locator = PinLocator()
+            pins = locator.get_all_symbol_pins(Path(sch_path), reference)
+            if not pins:
+                return {"success": False,
+                        "error": f"No pins found for {reference} — symbol may not be in schematic"}
+            return {"success": True, "reference": reference,
+                    "pins": {num: {"x": xy[0], "y": xy[1]} for num, xy in pins.items()}}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_get_net_connections(self, params: Dict) -> Dict:
         return self._sch_delegate(["get_net_connections"], params)

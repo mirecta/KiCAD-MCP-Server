@@ -1637,7 +1637,15 @@ SCHEMATIC_TOOLS = [
     {
         "name": "add_schematic_wire",
         "title": "Draw Wire Between Pins",
-        "description": "Draws a wire on the schematic between two or more coordinate points. Always call get_schematic_pin_locations first to get the approximate pin coordinates, then pass them as the first and last waypoints. snapToPins (on by default) will correct any float imprecision by snapping endpoints to the exact nearest pin coordinate. To route around components, add intermediate waypoints between the start and end: e.g. [[x1,y1], [xMid,y1], [xMid,y2], [x2,y2]] routes horizontally then vertically. Intermediate waypoints are never snapped.",
+        "description": (
+            "Draws a wire connecting two schematic pins. "
+            "PREFERRED: use fromRef/fromPin/toRef/toPin to connect by component reference and pin number "
+            "— the server resolves the exact coordinates automatically. "
+            "Example: {fromRef:'R1', fromPin:'2', toRef:'R2', toPin:'1'} connects R1 pin 2 to R2 pin 1. "
+            "Add optional 'via' waypoints [[x,y],...] to route around obstacles. "
+            "ALTERNATIVE: supply raw 'waypoints' [[x1,y1],[x2,y2],...] if you already know the coordinates. "
+            "Pin references accept pin numbers ('1','2') or pin names ('GND','VCC','SDA')."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1645,9 +1653,35 @@ SCHEMATIC_TOOLS = [
                     "type": "string",
                     "description": "Path to schematic file",
                 },
+                "fromRef": {
+                    "type": "string",
+                    "description": "Reference designator of the source component (e.g. 'R1', 'U1'). Use with fromPin/toRef/toPin instead of waypoints.",
+                },
+                "fromPin": {
+                    "type": ["string", "number"],
+                    "description": "Pin number or name on the source component (e.g. '1', '2', 'GND', 'OUT').",
+                },
+                "toRef": {
+                    "type": "string",
+                    "description": "Reference designator of the destination component.",
+                },
+                "toPin": {
+                    "type": ["string", "number"],
+                    "description": "Pin number or name on the destination component.",
+                },
+                "via": {
+                    "type": "array",
+                    "description": "Optional intermediate [x,y] waypoints for routing around obstacles when using fromRef/toRef mode. E.g. [[xMid,y1],[xMid,y2]] creates an L-bend.",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                },
                 "waypoints": {
                     "type": "array",
-                    "description": "Array of [x, y] coordinates defining the wire path. First and last points are the pin locations (from get_schematic_pin_locations). Add intermediate points to route around obstacles.",
+                    "description": "Alternative to fromRef/toRef: explicit [x,y] coordinates defining the wire path (at least 2 points). Use get_schematic_pin_locations to look up coordinates first.",
                     "items": {
                         "type": "array",
                         "items": {"type": "number"},
@@ -1656,18 +1690,8 @@ SCHEMATIC_TOOLS = [
                     },
                     "minItems": 2,
                 },
-                "snapToPins": {
-                    "type": "boolean",
-                    "description": "When true, the first and last waypoints are snapped to the nearest schematic pin within snapTolerance mm. Intermediate waypoints are left unchanged. Enabled by default to correct float coordinate imprecision.",
-                    "default": True,
-                },
-                "snapTolerance": {
-                    "type": "number",
-                    "description": "Maximum distance in mm to search for a nearby pin when snapToPins is enabled.",
-                    "default": 1.0,
-                },
             },
-            "required": ["schematicPath", "waypoints"],
+            "required": ["schematicPath"],
         },
     },
     {
@@ -3012,12 +3036,34 @@ ADDITIONAL_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "download_jlcpcb_database",
         "title": "Download JLCPCB Database",
-        "description": "Download or update the local JLCPCB parts database SQLite file.",
+        "description": (
+            "Download or update the local JLCPCB parts database. "
+            "source='jlcsearch' (default, no auth, slow 100-per-page scrape via jlcsearch.tscircuit.com), "
+            "'sqlite' (no auth, fast bulk download of a SQLite release artifact such as yaqwsx/jlcparts), "
+            "or 'official' (fast, requires JLCPCB_APP_ID/JLCPCB_API_KEY/JLCPCB_API_SECRET env vars)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "outputPath": {"type": "string", "description": "Path to store the database file"},
-                "force": {"type": "boolean", "description": "Force re-download even if file exists"},
+                "source": {
+                    "type": "string",
+                    "enum": ["jlcsearch", "sqlite", "official"],
+                    "description": "Which data source to use (default: jlcsearch)",
+                },
+                "sqliteUrl": {
+                    "type": "string",
+                    "description": "Override the SQLite asset URL (only for source='sqlite'). Defaults to latest yaqwsx/jlcparts GitHub release.",
+                },
+                "sqliteTable": {
+                    "type": "string",
+                    "description": "Override the parts table name in the downloaded SQLite (only for source='sqlite').",
+                },
+                "keepSqliteAt": {
+                    "type": "string",
+                    "description": "If set, save the downloaded SQLite file at this path instead of a temp dir (source='sqlite').",
+                },
+                "outputPath": {"type": "string", "description": "Path to store the imported parts database file"},
+                "force": {"type": "boolean", "description": "Force re-download even if local DB already has parts"},
             },
         },
     },

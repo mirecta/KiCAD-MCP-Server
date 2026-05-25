@@ -1000,4 +1000,80 @@ MVP gives JLCPCB-empowered project bootstrap. **~12–17 h.**
 
 ---
 
+## Open Problems & TODO (session 2026-05-25)
+
+### Schematic wire UX — FIXED
+
+**Problem:** `add_schematic_wire` required the caller to look up exact pin coordinates first via
+`get_schematic_pin_locations` and pass raw `waypoints`. Forgetting to look up coords, or using
+slightly wrong values, broke the connection silently.
+
+**Fix (this session):**
+- `add_schematic_wire` now accepts `fromRef`/`fromPin`/`toRef`/`toPin` as a first-class
+  alternative to `waypoints`. The dispatcher calls `PinLocator.get_pin_location()` internally
+  to resolve exact coordinates.
+- Optional `via` list allows intermediate bend-points when routing around obstacles.
+- `waypoints` still works for callers that already know coordinates.
+- Schema updated; description says "PREFERRED: use fromRef/fromPin/toRef/toPin".
+
+### Unimplemented `_sch_delegate` stubs (~20 tools return "not yet routed")
+
+The following schematic tools hit `_sch_delegate` and return an error instead of working:
+
+| Tool | Needed for |
+|------|-----------|
+| `move_schematic_component` | repositioning placed parts |
+| `rotate_schematic_component` | flipping components |
+| `delete_schematic_wire` | editing wiring |
+| `delete_schematic_net_label` | editing labels |
+| `move_schematic_net_label` | editing labels |
+| `list_schematic_nets` | ERC prep, netlist review |
+| `list_schematic_labels` | connectivity check |
+| `list_schematic_texts` | annotation review |
+| `edit_schematic_component` | changing values/footprints |
+| `set_schematic_component_property` | setting LCSC/footprint |
+| `remove_schematic_component_property` | cleaning properties |
+| `get_schematic_component` | inspecting properties |
+| `add_schematic_junction` | T-wire junctions |
+| `add_schematic_power_symbol` | PWR_FLAG symbols |
+| `add_schematic_bus` | bus routing |
+| `add_sheet_pin` | hierarchical sheets |
+| `annotate_schematic` | auto-reference numbering |
+| `run_erc` | error check |
+| `export_schematic_pdf` | PDF output |
+| `export_schematic_svg` | SVG output |
+| `sync_schematic_to_board` | PCB sync after schematic edit |
+| `connect_to_net` / `connect_passthrough` | high-level connectivity |
+
+These need concrete implementations (skip/sexpdata/kicad-cli) added to `dispatcher.py`.
+
+### JLCPCB integration
+
+**Fixed this session** (`kicad_mcp/dispatcher.py`):
+- `_handle_search_jlcpcb_parts` was passing the raw `params` dict to `JLCPCBPartsManager.search_parts`, which expects named kwargs → crashed with `'dict' object has no attribute 'strip'`. Now unpacks `query`/`category`/`package`/`basic`/`inStock`/`limit`.
+- `_handle_get_jlcpcb_part` called non-existent `get_part(params)` → fixed to `get_part_info(partNumber)`.
+- `_handle_get_jlcpcb_database_stats` called non-existent `get_stats(params)` → fixed to `get_database_stats()`.
+- `_handle_suggest_jlcpcb_alternatives` was passing dict → now unpacks `reference`/`limit`.
+- `_handle_download_jlcpcb_database` rewritten to dispatch by `source` param: `jlcsearch` (default) / `sqlite` / `official`.
+
+**Open**:
+
+1. **yaqwsx/jlcparts multi-volume zip not implemented.** The new `kicad_mcp/commands/sqlite_loader.py::SqliteBulkLoader` assumes a single-file artifact (zip-with-one-sqlite, or raw .sqlite3) via GitHub Releases API. Reality:
+   - yaqwsx hosts on **GitHub Pages**, not Releases — base URL `https://yaqwsx.github.io/jlcparts/data/`.
+   - Files: `cache.zip` + `cache.z01 .. cache.z30+` (~50 MB/part, ~1.5 GB total compressed).
+   - This is a **multi-volume split zip**; Python `zipfile` can't extract it. Use `/usr/bin/7z x cache.zip` after downloading all parts.
+   - TODO: add URL-list mode to `SqliteBulkLoader`; auto-probe `cache.z01..` until 404; shell out to `7z`; locate the extracted `cache.sqlite3`; pass rows through `import_jlcsearch_parts`. Default URL base = yaqwsx Pages.
+
+2. **yaqwsx schema not verified against `import_jlcsearch_parts` field names.** Once (1) lands, run `PRAGMA table_info(<largest_table>)` on the extracted SQLite and confirm columns map cleanly. Likely needs a `import_yaqwsx_parts()` variant with explicit field mapping.
+
+3. **Official JLCPCB API registration URL unknown.** Code path (`source: "official"`) works if `JLCPCB_APP_ID` / `JLCPCB_API_KEY` / `JLCPCB_API_SECRET` env vars are set, but the public signup URL is undocumented in our repo and my guess of `jlcpcb.com/developer` was 404. Find and document the correct flow, or mark the official path as "bring your own creds, contact JLCPCB support".
+
+4. **JLCSearch full-catalog scrape works but is slow.** ~25k requests at 100 parts/page, ~40-60 min for the full DB. Suitable as default fallback for users who don't want auth; recommend bulk-SQLite once (1) is implemented.
+
+### Live demo deferred
+
+5. **555 astable LED blinker schematic** — pending. Will build with KiCAD's built-in symbol libraries (`Timer:NE555P`, `Device:R/C/LED`) and attach LCSC IDs via live `JLCSearch` query rather than full DB download.
+
+---
+
 END OF PLAN.md
