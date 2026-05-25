@@ -100,7 +100,7 @@ class ProjectCommands:
 
                 schematic_uuid = str(uuid_module.uuid4())
                 with open(schematic_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write('(kicad_sch (version 20250114) (generator "KiCAD-MCP-Server")\n\n')
+                    f.write('(kicad_sch (version 20250114) (generator "eeschema") (generator_version "10.0")\n\n')
                     f.write(f"  (uuid {schematic_uuid})\n\n")
                     f.write('  (paper "A4")\n\n')
                     f.write("  (lib_symbols\n  )\n\n")

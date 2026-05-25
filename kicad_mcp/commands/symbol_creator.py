@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-KICAD9_SYMBOL_LIB_VERSION = "20241209"
+KICAD_SYMBOL_LIB_VERSION = "20241209"
 
 # Pin electrical types
 PIN_TYPES = {
@@ -142,9 +142,9 @@ class SymbolCreator:
         else:
             lib_content = (
                 f"(kicad_symbol_lib\n"
-                f"  (version {KICAD9_SYMBOL_LIB_VERSION})\n"
-                f'  (generator "kicad-mcp")\n'
-                f'  (generator_version "9.0")\n'
+                f"  (version {KICAD_SYMBOL_LIB_VERSION})\n"
+                f'  (generator "kicad_symbol_editor")\n'
+                f'  (generator_version "10.0")\n'
                 f")\n"
             )
 
