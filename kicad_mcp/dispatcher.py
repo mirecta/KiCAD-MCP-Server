@@ -317,8 +317,12 @@ class KiCADDispatcher:
     def _handle_create_project(self, params: Dict) -> Dict:
         result = self.project_commands.create_project(params)
         if result.get("success"):
-            # Load the created board
-            board_path = result.get("project", {}).get("boardPath")
+            proj = result.get("project", {})
+            sch_path = proj.get("schematicPath")
+            if sch_path:
+                self._sch_path = sch_path
+                self._sch_manager = None  # force reload on next use
+            board_path = proj.get("boardPath")
             if board_path and self._pcbnew:
                 try:
                     board = self._pcbnew.LoadBoard(board_path)
@@ -329,9 +333,21 @@ class KiCADDispatcher:
 
     def _handle_open_project(self, params: Dict) -> Dict:
         result = self.project_commands.open_project(params)
-        if result.get("success") and self._pcbnew:
-            board_path = result.get("project", {}).get("boardPath") or params.get("filename")
-            if board_path:
+        if result.get("success"):
+            proj = result.get("project", {})
+            # Derive schematic path: project may return it, otherwise infer from .kicad_pro
+            sch_path = proj.get("schematicPath")
+            if not sch_path:
+                proj_file = proj.get("path") or params.get("filename") or ""
+                if proj_file.endswith(".kicad_pro"):
+                    candidate = proj_file[: -len(".kicad_pro")] + ".kicad_sch"
+                    if os.path.exists(candidate):
+                        sch_path = candidate
+            if sch_path:
+                self._sch_path = sch_path
+                self._sch_manager = None
+            board_path = proj.get("boardPath") or params.get("filename")
+            if board_path and self._pcbnew:
                 try:
                     board = self._pcbnew.LoadBoard(board_path)
                     self._set_board(board)
@@ -531,14 +547,22 @@ class KiCADDispatcher:
     def _handle_create_schematic(self, params: Dict) -> Dict:
         try:
             from kicad_mcp.commands.schematic import SchematicManager
-            name = params.get("name", "schematic")
-            path = params.get("path", ".")
-            sch = SchematicManager.create_schematic(name, path=path)
-            sch_path = os.path.join(path, f"{name}.kicad_sch")
-            self._sch_path = sch_path
+            # MCP schema uses `filename` (full path). Original code used `name`+`path`.
+            filename = params.get("filename")
+            if filename:
+                filename = os.path.abspath(os.path.expanduser(filename))
+                target_dir = os.path.dirname(filename) or "."
+                name = os.path.splitext(os.path.basename(filename))[0]
+            else:
+                name = params.get("name", "schematic")
+                target_dir = params.get("path", ".")
+            os.makedirs(target_dir, exist_ok=True)
+            sch = SchematicManager.create_schematic(name, path=target_dir)
+            actual_path = os.path.join(target_dir, f"{name}.kicad_sch")
+            self._sch_path = actual_path
             self._sch_manager = sch
-            return {"success": True, "message": f"Created schematic: {sch_path}",
-                    "schematicPath": sch_path}
+            return {"success": True, "message": f"Created schematic: {actual_path}",
+                    "schematicPath": actual_path}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
@@ -565,21 +589,75 @@ class KiCADDispatcher:
             return {"success": False, "error": str(exc)}
 
     def _sch_delegate(self, method_chain: list, params: Dict) -> Dict:
-        """Helper: load schematic path from params, then call a chain of methods."""
-        path = self._sch_path_from_params(params)
-        try:
-            from kicad_mcp.commands.wire_manager import WireManager
-            wm = WireManager(path)
-            obj = wm
-            for attr in method_chain:
-                obj = getattr(obj, attr)
-            return obj(params)
-        except Exception as exc:
-            logger.error(f"Schematic operation error: {exc}")
-            return {"success": False, "error": str(exc)}
+        """Stub for schematic ops not yet routed to a specific manager.
+
+        The previous implementation hardcoded ``WireManager(path)`` which
+        fails because (a) ``WireManager`` has no ``__init__`` accepting a
+        path, and (b) operations like ``add_component`` / ``add_net_label``
+        live on ``ComponentManager`` / ``ConnectionManager`` respectively.
+        Concrete handlers below now call their managers directly.
+        """
+        op = method_chain[0] if method_chain else "<unknown>"
+        return {"success": False,
+                "error": f"Schematic op {op!r} is not yet routed in dispatcher"}
+
+    def _resolve_sch_path(self, params: Dict) -> Optional[Path]:
+        """Resolve schematic path from params or cached state, as a Path."""
+        p = self._sch_path_from_params(params)
+        return Path(p) if p else None
+
+    def _resolve_project_dir(self, sch_file: Path) -> Path:
+        """Walk up from a .kicad_sch to find the directory owning the project."""
+        proj_dir = sch_file.parent
+        for ancestor in [sch_file.parent, *sch_file.parents]:
+            if (ancestor / "sym-lib-table").exists() or any(ancestor.glob("*.kicad_pro")):
+                return ancestor
+        return proj_dir
+
+    # ---- Component ---------------------------------------------------
 
     def _handle_add_schematic_component(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_component"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False,
+                    "error": "No schematic loaded. Call create_project / open_project / create_schematic first."}
+        symbol = params.get("symbol", "")
+        if ":" not in symbol:
+            return {"success": False,
+                    "error": f"symbol must be 'Library:Name', got {symbol!r}"}
+        library, sym_name = symbol.split(":", 1)
+        reference = params.get("reference", "X?")
+        value = params.get("value") or sym_name
+        footprint = params.get("footprint", "")
+        try:
+            x = float(params.get("x", 0))
+            y = float(params.get("y", 0))
+            unit = int(params.get("unit", 1))
+        except (TypeError, ValueError) as exc:
+            return {"success": False, "error": f"invalid numeric arg: {exc}"}
+        try:
+            from kicad_mcp.commands.dynamic_symbol_loader import DynamicSymbolLoader
+            proj_dir = self._resolve_project_dir(sch_file)
+            loader = DynamicSymbolLoader(project_path=proj_dir)
+            ok = loader.add_component(
+                sch_file, library, sym_name,
+                reference=reference, value=value, footprint=footprint,
+                x=x, y=y, unit=unit, project_path=proj_dir,
+            )
+            if not ok:
+                return {"success": False,
+                        "error": "DynamicSymbolLoader.add_component returned False"}
+            return {
+                "success": True,
+                "reference": reference,
+                "symbol": symbol,
+                "value": value,
+                "position": [x, y],
+                "schematic": str(sch_file),
+            }
+        except Exception as exc:
+            logger.exception("add_schematic_component failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_delete_schematic_component(self, params: Dict) -> Dict:
         return self._sch_delegate(["delete_component"], params)
@@ -596,20 +674,150 @@ class KiCADDispatcher:
     def _handle_get_schematic_component(self, params: Dict) -> Dict:
         return self._sch_delegate(["get_component"], params)
 
+    # ---- Wires / labels / no-connect / text --------------------------
+
     def _handle_add_schematic_wire(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_wire"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        waypoints = params.get("waypoints") or []
+        if len(waypoints) < 2:
+            return {"success": False, "error": "waypoints requires at least 2 [x,y] points"}
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in waypoints]
+        except (TypeError, ValueError, IndexError) as exc:
+            return {"success": False, "error": f"invalid waypoints: {exc}"}
+        try:
+            from kicad_mcp.commands.wire_manager import WireManager
+            if len(pts) == 2:
+                ok = WireManager.add_wire(sch_file, pts[0], pts[1])
+            else:
+                ok = WireManager.add_polyline_wire(sch_file, pts)
+            if not ok:
+                return {"success": False, "error": "WireManager add_wire returned False"}
+            return {"success": True, "waypoints": pts, "schematic": str(sch_file)}
+        except Exception as exc:
+            logger.exception("add_schematic_wire failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_add_schematic_net_label(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_net_label"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        net_name = params.get("netName")
+        if not net_name:
+            return {"success": False, "error": "netName is required"}
+        label_type = params.get("labelType", "label")
+        try:
+            orientation = int(params.get("orientation", 0))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "orientation must be integer"}
+
+        component_ref = params.get("componentRef")
+        pin_number = params.get("pinNumber")
+        position = params.get("position")
+        snapped_to_pin = None
+
+        if component_ref and pin_number is not None:
+            try:
+                from kicad_mcp.commands.pin_locator import PinLocator
+                locator = PinLocator()
+                pos = locator.get_pin_location(sch_file, component_ref, str(pin_number))
+                if pos is None:
+                    return {"success": False,
+                            "error": f"Pin {component_ref}.{pin_number} not found"}
+                position = [pos[0], pos[1]]
+                snapped_to_pin = {"reference": component_ref, "pin": str(pin_number)}
+            except Exception as exc:
+                logger.exception("pin lookup failed")
+                return {"success": False, "error": f"pin lookup failed: {exc}"}
+
+        if not position or len(position) != 2:
+            return {"success": False,
+                    "error": "either position [x,y] or componentRef+pinNumber required"}
+        try:
+            pos = [float(position[0]), float(position[1])]
+        except (TypeError, ValueError) as exc:
+            return {"success": False, "error": f"invalid position: {exc}"}
+        try:
+            from kicad_mcp.commands.wire_manager import WireManager
+            ok = WireManager.add_label(sch_file, net_name, pos,
+                                       label_type=label_type, orientation=orientation)
+            if not ok:
+                return {"success": False, "error": "WireManager.add_label returned False"}
+            return {
+                "success": True,
+                "netName": net_name,
+                "actual_position": pos,
+                "snapped_to_pin": snapped_to_pin,
+                "schematic": str(sch_file),
+            }
+        except Exception as exc:
+            logger.exception("add_schematic_net_label failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_add_no_connect(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_no_connect"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        position = params.get("position")
+        if not position or len(position) != 2:
+            return {"success": False, "error": "position [x,y] required"}
+        try:
+            pos = [float(position[0]), float(position[1])]
+            from kicad_mcp.commands.wire_manager import WireManager
+            ok = WireManager.add_no_connect(sch_file, pos)
+            if not ok:
+                return {"success": False, "error": "add_no_connect returned False"}
+            return {"success": True, "position": pos, "schematic": str(sch_file)}
+        except Exception as exc:
+            logger.exception("add_no_connect failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_add_schematic_hierarchical_label(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_hierarchical_label"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        text = params.get("text") or params.get("netName")
+        position = params.get("position")
+        if not text or not position or len(position) != 2:
+            return {"success": False, "error": "text and position [x,y] required"}
+        shape = params.get("shape", "bidirectional")
+        try:
+            orientation = int(params.get("orientation", 0))
+            pos = [float(position[0]), float(position[1])]
+            from kicad_mcp.commands.wire_manager import WireManager
+            ok = WireManager.add_hierarchical_label(sch_file, text, pos,
+                                                    shape=shape, orientation=orientation)
+            if not ok:
+                return {"success": False, "error": "add_hierarchical_label returned False"}
+            return {"success": True, "text": text, "position": pos, "schematic": str(sch_file)}
+        except Exception as exc:
+            logger.exception("add_hierarchical_label failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_add_schematic_text(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_text"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        text = params.get("text")
+        if not text:
+            return {"success": False, "error": "text is required"}
+        try:
+            x = float(params.get("x", 0))
+            y = float(params.get("y", 0))
+            rotation = float(params.get("rotation", 0))
+            size = float(params.get("size", 1.27))
+            from kicad_mcp.commands.wire_manager import WireManager
+            ok = WireManager.add_text(sch_file, text, [x, y],
+                                      angle=rotation, font_size=size)
+            if not ok:
+                return {"success": False, "error": "WireManager.add_text returned False"}
+            return {"success": True, "text": text, "position": [x, y],
+                    "schematic": str(sch_file)}
+        except Exception as exc:
+            logger.exception("add_schematic_text failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_add_sheet_pin(self, params: Dict) -> Dict:
         return self._sch_delegate(["add_sheet_pin"], params)
