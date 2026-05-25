@@ -8,6 +8,7 @@ and providing search functionality for component selection.
 import logging
 import os
 import re
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -55,15 +56,16 @@ class SymbolLibraryManager:
         self.libraries: Dict[str, str] = {}  # nickname -> path mapping
         self.symbol_cache: Dict[str, List[SymbolInfo]] = {}  # library -> [SymbolInfo]
         self._load_libraries()
-        self._warm_cache()
+        self._cache_lock = threading.Lock()
+        t = threading.Thread(target=self._warm_cache, daemon=True, name="kicad-sym-cache")
+        t.start()
 
     def _warm_cache(self) -> None:
-        """Pre-parse all symbol libraries so the first search is fast.
+        """Pre-parse all symbol libraries in the background so searches are fast.
 
-        Without this, the first ``search_symbols`` call parses every
-        .kicad_sym file on demand, which can take 30-120 s across
-        200+ libraries.  By populating the cache here (during startup,
-        before the READY handshake) the cost is paid once.
+        Runs in a daemon thread so it never blocks tool calls. The cache lock
+        ensures search_symbols waits for a library entry to finish if it happens
+        to be requested mid-warm.
         """
         for nickname in list(self.libraries.keys()):
             try:
@@ -303,8 +305,9 @@ class SymbolLibraryManager:
                     i += 1
 
                 if end_pos == start_pos:
-                    logger.warning(
-                        f"Malformed symbol block for '{symbol_name}' in {library_path}; skipping"
+                    logger.debug(
+                        "Malformed symbol block for '%s' in %s; skipping",
+                        symbol_name, library_path,
                     )
                     continue
 
