@@ -644,7 +644,10 @@ class KiCADDispatcher:
             return {"success": False, "error": "No schematic loaded"}
         try:
             sch.write(self._sch_path)
-            return {"success": True, "message": f"Saved: {self._sch_path}"}
+            from kicad_mcp.commands.ipc_reload import try_reload
+            result = {"success": True, "message": f"Saved: {self._sch_path}"}
+            result.update(try_reload(self._sch_path))
+            return result
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
@@ -697,6 +700,7 @@ class KiCADDispatcher:
             return {"success": False, "error": f"invalid numeric arg: {exc}"}
         try:
             from kicad_mcp.commands.dynamic_symbol_loader import DynamicSymbolLoader
+            from kicad_mcp.commands.ipc_reload import try_reload
             proj_dir = self._resolve_project_dir(sch_file)
             loader = DynamicSymbolLoader(project_path=proj_dir)
             ok = loader.add_component(
@@ -707,7 +711,7 @@ class KiCADDispatcher:
             if not ok:
                 return {"success": False,
                         "error": "DynamicSymbolLoader.add_component returned False"}
-            return {
+            result = {
                 "success": True,
                 "reference": reference,
                 "symbol": symbol,
@@ -715,6 +719,8 @@ class KiCADDispatcher:
                 "position": [x, y],
                 "schematic": str(sch_file),
             }
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             logger.exception("add_schematic_component failed")
             return {"success": False, "error": str(exc)}
@@ -754,7 +760,10 @@ class KiCADDispatcher:
             if removed == 0:
                 return {"success": False, "error": f"Component {reference} not found"}
             sch_file.write_text(sexpdata.dumps(new_data), encoding="utf-8")
-            return {"success": True, "reference": reference, "removed": removed}
+            from kicad_mcp.commands.ipc_reload import try_reload
+            result = {"success": True, "reference": reference, "removed": removed}
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
@@ -825,6 +834,7 @@ class KiCADDispatcher:
 
         try:
             from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
             if len(pts) == 2:
                 ok = WireManager.add_wire(sch_file, pts[0], pts[1])
             else:
@@ -834,6 +844,7 @@ class KiCADDispatcher:
             result: Dict = {"success": True, "waypoints": pts, "schematic": str(sch_file)}
             if resolved_pins:
                 result["resolved_pins"] = resolved_pins
+            result.update(try_reload(sch_file))
             return result
         except Exception as exc:
             logger.exception("add_schematic_wire failed")
@@ -880,17 +891,20 @@ class KiCADDispatcher:
             return {"success": False, "error": f"invalid position: {exc}"}
         try:
             from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
             ok = WireManager.add_label(sch_file, net_name, pos,
                                        label_type=label_type, orientation=orientation)
             if not ok:
                 return {"success": False, "error": "WireManager.add_label returned False"}
-            return {
+            result = {
                 "success": True,
                 "netName": net_name,
                 "actual_position": pos,
                 "snapped_to_pin": snapped_to_pin,
                 "schematic": str(sch_file),
             }
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             logger.exception("add_schematic_net_label failed")
             return {"success": False, "error": str(exc)}
@@ -905,10 +919,13 @@ class KiCADDispatcher:
         try:
             pos = [float(position[0]), float(position[1])]
             from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
             ok = WireManager.add_no_connect(sch_file, pos)
             if not ok:
                 return {"success": False, "error": "add_no_connect returned False"}
-            return {"success": True, "position": pos, "schematic": str(sch_file)}
+            result = {"success": True, "position": pos, "schematic": str(sch_file)}
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             logger.exception("add_no_connect failed")
             return {"success": False, "error": str(exc)}
@@ -926,11 +943,14 @@ class KiCADDispatcher:
             orientation = int(params.get("orientation", 0))
             pos = [float(position[0]), float(position[1])]
             from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
             ok = WireManager.add_hierarchical_label(sch_file, text, pos,
                                                     shape=shape, orientation=orientation)
             if not ok:
                 return {"success": False, "error": "add_hierarchical_label returned False"}
-            return {"success": True, "text": text, "position": pos, "schematic": str(sch_file)}
+            result = {"success": True, "text": text, "position": pos, "schematic": str(sch_file)}
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             logger.exception("add_hierarchical_label failed")
             return {"success": False, "error": str(exc)}
@@ -948,12 +968,15 @@ class KiCADDispatcher:
             rotation = float(params.get("rotation", 0))
             size = float(params.get("size", 1.27))
             from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
             ok = WireManager.add_text(sch_file, text, [x, y],
                                       angle=rotation, font_size=size)
             if not ok:
                 return {"success": False, "error": "WireManager.add_text returned False"}
-            return {"success": True, "text": text, "position": [x, y],
-                    "schematic": str(sch_file)}
+            result = {"success": True, "text": text, "position": [x, y],
+                      "schematic": str(sch_file)}
+            result.update(try_reload(sch_file))
+            return result
         except Exception as exc:
             logger.exception("add_schematic_text failed")
             return {"success": False, "error": str(exc)}
