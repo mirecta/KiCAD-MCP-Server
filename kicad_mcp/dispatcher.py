@@ -886,6 +886,14 @@ class KiCADDispatcher:
             td = _angle_dir(ta)
 
             # --- Try simple L-bend (no extra stubs) ---
+            # When destination pin exits vertically, V-first arrives at pin y-level
+            # from the side — avoids H-first corner landing inside the component body.
+            if td[1] != 0:
+                v_ok = (fd == (0, 0) or fd[0] != 0
+                        or (fd[1] != 0 and (y2 - y1) * fd[1] > 0))
+                if v_ok:
+                    return [p1, [x1, y2], p2]
+
             # H-first valid when: from exits H toward x2, and to exits V from correct side
             h_from = fd[0] != 0 and (x2 - x1) * fd[0] > 0
             h_to   = td == (0, 0) or (td[1] != 0 and (y2 - y1) * (-td[1]) > 0)
