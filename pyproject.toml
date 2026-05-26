@@ -15,6 +15,7 @@ dependencies = [
     "colorlog>=6.7.0",
     "python-dotenv>=1.0.0",
     "kicad-python>=0.7.0",
+    "kicad-skip>=0.2.5",
 ]
 
 [project.optional-dependencies]
