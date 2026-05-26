@@ -818,7 +818,16 @@ class KiCADDispatcher:
             except (TypeError, ValueError, IndexError) as exc:
                 return {"success": False, "error": f"invalid via waypoints: {exc}"}
 
-            pts = [start] + via_pts + [end]
+            # Resolve pin angles for direction-aware routing (only when no manual vias)
+            from_angle = None
+            to_angle = None
+            if not via_pts:
+                try:
+                    from_angle = locator.get_pin_angle(sch_file, from_ref, str(from_pin))
+                    to_angle = locator.get_pin_angle(sch_file, to_ref, str(to_pin))
+                except Exception:
+                    pass
+
             resolved_pins = {
                 "from": {"ref": from_ref, "pin": str(from_pin), "position": start},
                 "to":   {"ref": to_ref,   "pin": str(to_pin),   "position": end},
@@ -835,18 +844,55 @@ class KiCADDispatcher:
             except (TypeError, ValueError, IndexError) as exc:
                 return {"success": False, "error": f"invalid waypoints: {exc}"}
             resolved_pins = None
+            via_pts = None  # signals: already have pts, skip smart routing
 
         def _manhattan(pts):
             """Ensure all segments in pts are axis-aligned, inserting corners where needed."""
             out = [pts[0]]
             for a, b in zip(pts, pts[1:]):
                 if abs(a[0] - b[0]) > 1e-6 and abs(a[1] - b[1]) > 1e-6:
-                    # diagonal — insert corner: horizontal first, then vertical
-                    out.append([b[0], a[1]])
+                    # vertical-first: go to destination y first, then x
+                    out.append([a[0], b[1]])
                 out.append(b)
             return out
 
-        pts = _manhattan(pts)
+        def _is_horiz_pin(angle):
+            if angle is None:
+                return None
+            a = angle % 360
+            return abs(a) < 1 or abs(a - 180) < 1
+
+        if via_pts is None:
+            # Coordinate mode — pts already set, just enforce Manhattan
+            pts = _manhattan(pts)
+        elif via_pts:
+            # Ref mode with manual waypoints — enforce Manhattan
+            pts = _manhattan([start] + via_pts + [end])
+        else:
+            # Ref mode, no manual waypoints — smart direction-aware routing
+            x1, y1 = start[0], start[1]
+            x2, y2 = end[0], end[1]
+            if abs(x1 - x2) < 1e-4 or abs(y1 - y2) < 1e-4:
+                pts = [start, end]
+            elif from_angle is not None or to_angle is not None:
+                from_horiz = _is_horiz_pin(from_angle)
+                to_horiz = _is_horiz_pin(to_angle)
+                if from_horiz and to_horiz:
+                    # Both horizontal pins: Z-route via midpoint x
+                    mid_x = (x1 + x2) / 2
+                    pts = [start, [mid_x, y1], [mid_x, y2], end]
+                elif from_horiz:
+                    # From-pin exits horizontally: go horizontal first then vertical
+                    pts = [start, [x2, y1], end]
+                elif to_horiz:
+                    # To-pin must be approached horizontally: go vertical first then horizontal
+                    pts = [start, [x1, y2], end]
+                else:
+                    # Both vertical pins: go horizontal first then vertical
+                    pts = [start, [x2, y1], end]
+            else:
+                # Unknown pin angles — default to vertical-first Manhattan
+                pts = _manhattan([start, end])
 
         try:
             from kicad_mcp.commands.wire_manager import WireManager
