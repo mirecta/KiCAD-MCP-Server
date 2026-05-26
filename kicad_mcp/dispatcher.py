@@ -856,11 +856,67 @@ class KiCADDispatcher:
                 out.append(b)
             return out
 
-        def _is_horiz_pin(angle):
+        _STUB = 5.08  # escape/approach stub in mm (2 KiCAD grid squares)
+
+        def _angle_dir(angle):
+            """Unit (dx,dy) exit vector. KiCAD: y increases downward on screen."""
             if angle is None:
-                return None
+                return (0, 0)
             a = angle % 360
-            return abs(a) < 1 or abs(a - 180) < 1
+            if abs(a) < 1:        return (1,  0)   # RIGHT
+            if abs(a - 90) < 1:   return (0, -1)   # UP   (y decreases)
+            if abs(a - 180) < 1:  return (-1, 0)   # LEFT
+            if abs(a - 270) < 1:  return (0,  1)   # DOWN (y increases)
+            return (0, 0)
+
+        def _route_pins(p1, p2, fa, ta):
+            """
+            Route from pin p1 (exit angle fa) to pin p2 (exit angle ta).
+            Always exits p1 in fa direction and approaches p2 from ta direction.
+            Uses a simple L-bend when possible, otherwise escape+approach stubs.
+            """
+            x1, y1 = p1[0], p1[1]
+            x2, y2 = p2[0], p2[1]
+
+            # Already axis-aligned — straight wire
+            if abs(x1 - x2) < 1e-4 or abs(y1 - y2) < 1e-4:
+                return [p1, p2]
+
+            fd = _angle_dir(fa)
+            td = _angle_dir(ta)
+
+            # --- Try simple L-bend (no extra stubs) ---
+            # H-first valid when: from exits H toward x2, and to exits V from correct side
+            h_from = fd[0] != 0 and (x2 - x1) * fd[0] > 0
+            h_to   = td == (0, 0) or (td[1] != 0 and (y2 - y1) * (-td[1]) > 0)
+            if h_from and h_to:
+                return [p1, [x2, y1], p2]
+
+            # V-first valid when: from exits V toward y2, and to exits H from correct side
+            v_from = fd[1] != 0 and (y2 - y1) * fd[1] > 0
+            v_to   = td == (0, 0) or (td[0] != 0 and (x2 - x1) * (-td[0]) > 0)
+            if v_from and v_to:
+                return [p1, [x1, y2], p2]
+
+            # --- Escape + approach: emit stub in each pin's exit direction ---
+            esc = [x1 + fd[0] * _STUB, y1 + fd[1] * _STUB] if fd != (0, 0) else [x1, y1]
+            app = [x2 + td[0] * _STUB, y2 + td[1] * _STUB] if td != (0, 0) else [x2, y2]
+
+            ex, ey = esc[0], esc[1]
+            ax, ay = app[0], app[1]
+
+            inner = []
+            if abs(ex - ax) > 1e-4 and abs(ey - ay) > 1e-4:
+                inner = [[ax, ey]]  # H-first corner between escape and approach
+
+            raw = [p1, esc] + inner + [app, p2]
+
+            # Deduplicate consecutive identical points
+            result = [raw[0]]
+            for pt in raw[1:]:
+                if abs(pt[0] - result[-1][0]) > 1e-4 or abs(pt[1] - result[-1][1]) > 1e-4:
+                    result.append(pt)
+            return result
 
         if via_pts is None:
             # Coordinate mode — pts already set, just enforce Manhattan
@@ -869,30 +925,13 @@ class KiCADDispatcher:
             # Ref mode with manual waypoints — enforce Manhattan
             pts = _manhattan([start] + via_pts + [end])
         else:
-            # Ref mode, no manual waypoints — smart direction-aware routing
+            # Ref mode, no manual waypoints — direction-aware routing
             x1, y1 = start[0], start[1]
             x2, y2 = end[0], end[1]
             if abs(x1 - x2) < 1e-4 or abs(y1 - y2) < 1e-4:
                 pts = [start, end]
-            elif from_angle is not None or to_angle is not None:
-                from_horiz = _is_horiz_pin(from_angle)
-                to_horiz = _is_horiz_pin(to_angle)
-                if from_horiz and to_horiz:
-                    # Both horizontal pins: Z-route via midpoint x
-                    mid_x = (x1 + x2) / 2
-                    pts = [start, [mid_x, y1], [mid_x, y2], end]
-                elif from_horiz:
-                    # From-pin exits horizontally: go horizontal first then vertical
-                    pts = [start, [x2, y1], end]
-                elif to_horiz:
-                    # To-pin must be approached horizontally: go vertical first then horizontal
-                    pts = [start, [x1, y2], end]
-                else:
-                    # Both vertical pins: go horizontal first then vertical
-                    pts = [start, [x2, y1], end]
             else:
-                # Unknown pin angles — default to vertical-first Manhattan
-                pts = _manhattan([start, end])
+                pts = _route_pins(start, end, from_angle, to_angle)
 
         try:
             from kicad_mcp.commands.wire_manager import WireManager
