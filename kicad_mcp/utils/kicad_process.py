@@ -228,12 +228,17 @@ class KiCADProcessManager:
 
             logger.info(f"Launching KiCAD: {' '.join(cmd)}")
 
+            # Enable IPC API server so live reload works without manual config
+            env = os.environ.copy()
+            env["KICAD_ENABLE_SCRIPTING_SERVER"] = "1"
+
             # Launch process in background
             system = platform.system()
             if system == "Windows":
                 # Windows: Use CREATE_NEW_PROCESS_GROUP to detach
                 subprocess.Popen(
                     cmd,
+                    env=env,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -242,6 +247,7 @@ class KiCADProcessManager:
                 # Unix: Use nohup or start in background
                 subprocess.Popen(
                     cmd,
+                    env=env,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
