@@ -1054,7 +1054,70 @@ class KiCADDispatcher:
         return self._sch_delegate(["annotate"], params)
 
     def _handle_move_schematic_component(self, params: Dict) -> Dict:
-        return self._sch_delegate(["move_component"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        reference = params.get("reference")
+        if not reference:
+            return {"success": False, "error": "reference required"}
+        try:
+            new_x = float(params["x"])
+            new_y = float(params["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"success": False, "error": f"x/y required: {exc}"}
+        try:
+            import sexpdata
+            from sexpdata import Symbol
+            _SYM = Symbol("symbol")
+            _AT = Symbol("at")
+            _PROP = Symbol("property")
+            _REF_KEY = "Reference"
+            content = sch_file.read_text(encoding="utf-8")
+            sch_data = sexpdata.loads(content)
+            moved = 0
+            for item in sch_data[1:]:
+                if not (isinstance(item, list) and item and item[0] == _SYM):
+                    continue
+                # Find reference matching this component
+                ref_val = None
+                for sub in item[1:]:
+                    if (isinstance(sub, list) and len(sub) >= 3
+                            and sub[0] == _PROP
+                            and str(sub[1]).strip('"') == _REF_KEY):
+                        ref_val = str(sub[2]).strip('"').rstrip("_")
+                        break
+                if ref_val != reference:
+                    continue
+                # Find current (at x y angle)
+                old_x = old_y = None
+                for i, sub in enumerate(item):
+                    if isinstance(sub, list) and sub and sub[0] == _AT:
+                        old_x, old_y = float(sub[1]), float(sub[2])
+                        item[i] = [_AT, new_x, new_y] + list(sub[3:])
+                        break
+                if old_x is None:
+                    continue
+                dx, dy = new_x - old_x, new_y - old_y
+                # Shift all property positions by the same delta
+                for sub in item[1:]:
+                    if isinstance(sub, list) and sub and sub[0] == _PROP:
+                        for j, psub in enumerate(sub):
+                            if isinstance(psub, list) and psub and psub[0] == _AT:
+                                sub[j] = [_AT, float(psub[1]) + dx,
+                                          float(psub[2]) + dy] + list(psub[3:])
+                moved += 1
+            if moved == 0:
+                return {"success": False, "error": f"Component {reference} not found"}
+            sch_file.write_text(sexpdata.dumps(sch_data), encoding="utf-8")
+            from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
+            result = {"success": True, "reference": reference,
+                      "position": [new_x, new_y]}
+            result.update(try_reload(sch_file))
+            return result
+        except Exception as exc:
+            logger.exception("move_schematic_component failed")
+            return {"success": False, "error": str(exc)}
 
     def _handle_rotate_schematic_component(self, params: Dict) -> Dict:
         return self._sch_delegate(["rotate_component"], params)
@@ -1186,7 +1249,7 @@ class KiCADDispatcher:
                 if params.get("responseMode") == "inline":
                     return {"success": True, "format": fmt,
                             "data": base64.b64encode(data).decode()}
-                save_to = params.get("outputPath", out)
+                save_to = params.get("outputPath", actual)
                 with open(save_to, "wb") as fh:
                     fh.write(data)
                 return {"success": True, "format": fmt, "path": save_to}
