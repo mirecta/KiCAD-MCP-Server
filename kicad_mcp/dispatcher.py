@@ -1174,9 +1174,15 @@ class KiCADDispatcher:
                 out = os.path.join(tmp, f"view.{fmt}")
                 cmd = ["kicad-cli", "sch", "export", fmt, "-o", out, sch_path]
                 r = subprocess.run(cmd, capture_output=True, timeout=30)
-                if r.returncode != 0 or not os.path.exists(out):
+                # kicad-cli svg/png export writes into a directory named by -o;
+                # find the actual output file inside it if needed.
+                actual = out
+                if os.path.isdir(out):
+                    base = os.path.splitext(os.path.basename(sch_path))[0]
+                    actual = os.path.join(out, f"{base}.{fmt}")
+                if r.returncode != 0 or not os.path.exists(actual):
                     return {"success": False, "error": r.stderr.decode()[:500]}
-                data = open(out, "rb").read()
+                data = open(actual, "rb").read()
                 if params.get("responseMode") == "inline":
                     return {"success": True, "format": fmt,
                             "data": base64.b64encode(data).decode()}
@@ -1194,7 +1200,29 @@ class KiCADDispatcher:
         return self._sch_delegate(["export_svg"], params)
 
     def _handle_run_erc(self, params: Dict) -> Dict:
-        return self._sch_delegate(["run_erc"], params)
+        sch_path = self._sch_path_from_params(params)
+        if not sch_path:
+            return {"success": False, "error": "No schematic loaded"}
+        try:
+            import subprocess, tempfile, json as _json
+            with tempfile.TemporaryDirectory() as tmp:
+                out_file = os.path.join(tmp, "erc.json")
+                cmd = ["kicad-cli", "sch", "erc", "--format", "json",
+                       "-o", out_file, sch_path]
+                r = subprocess.run(cmd, capture_output=True, timeout=60)
+                if os.path.exists(out_file):
+                    try:
+                        erc_data = _json.loads(open(out_file).read())
+                        violations = erc_data.get("violations", [])
+                        return {"success": True, "violation_count": len(violations),
+                                "violations": violations[:50]}
+                    except Exception:
+                        pass
+                return {"success": r.returncode == 0,
+                        "output": r.stdout.decode()[:2000],
+                        "error": r.stderr.decode()[:500] if r.returncode != 0 else ""}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_sync_schematic_to_board(self, params: Dict) -> Dict:
         return self._sch_delegate(["sync_to_board"], params)
