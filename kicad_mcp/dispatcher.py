@@ -699,6 +699,10 @@ class KiCADDispatcher:
         except (TypeError, ValueError) as exc:
             return {"success": False, "error": f"invalid numeric arg: {exc}"}
         try:
+            angle = float(params.get("orientation") or params.get("angle") or 0)
+        except (TypeError, ValueError):
+            angle = 0.0
+        try:
             from kicad_mcp.commands.dynamic_symbol_loader import DynamicSymbolLoader
             from kicad_mcp.commands.ipc_reload import try_reload
             proj_dir = self._resolve_project_dir(sch_file)
@@ -706,7 +710,7 @@ class KiCADDispatcher:
             ok = loader.add_component(
                 sch_file, library, sym_name,
                 reference=reference, value=value, footprint=footprint,
-                x=x, y=y, unit=unit, project_path=proj_dir,
+                x=x, y=y, unit=unit, project_path=proj_dir, angle=angle,
             )
             if not ok:
                 return {"success": False,
@@ -831,6 +835,18 @@ class KiCADDispatcher:
             except (TypeError, ValueError, IndexError) as exc:
                 return {"success": False, "error": f"invalid waypoints: {exc}"}
             resolved_pins = None
+
+        def _manhattan(pts):
+            """Ensure all segments in pts are axis-aligned, inserting corners where needed."""
+            out = [pts[0]]
+            for a, b in zip(pts, pts[1:]):
+                if abs(a[0] - b[0]) > 1e-6 and abs(a[1] - b[1]) > 1e-6:
+                    # diagonal — insert corner: horizontal first, then vertical
+                    out.append([b[0], a[1]])
+                out.append(b)
+            return out
+
+        pts = _manhattan(pts)
 
         try:
             from kicad_mcp.commands.wire_manager import WireManager
@@ -991,7 +1007,48 @@ class KiCADDispatcher:
         return self._sch_delegate(["add_junction"], params)
 
     def _handle_add_schematic_power_symbol(self, params: Dict) -> Dict:
-        return self._sch_delegate(["add_power_symbol"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        net_name = params.get("netName")
+        if not net_name:
+            return {"success": False, "error": "netName required (e.g. VCC, GND, +3V3)"}
+
+        component_ref = params.get("componentRef")
+        pin_number = params.get("pinNumber")
+        position = params.get("position")
+
+        try:
+            orientation = int(params.get("orientation", 0))
+        except (TypeError, ValueError):
+            orientation = 0
+
+        # Resolve position from pin ref if given
+        if component_ref and pin_number is not None:
+            try:
+                from kicad_mcp.commands.pin_locator import PinLocator
+                locator = PinLocator()
+                pos = locator.get_pin_location(sch_file, component_ref, str(pin_number))
+                if pos is None:
+                    return {"success": False, "error": f"Pin {component_ref}.{pin_number} not found"}
+                position = [pos[0], pos[1]]
+            except Exception as exc:
+                return {"success": False, "error": f"pin lookup failed: {exc}"}
+
+        if not position or len(position) < 2:
+            return {"success": False, "error": "position [x, y] or componentRef+pinNumber required"}
+
+        try:
+            from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
+            ok = WireManager.add_power_symbol(sch_file, net_name, position, orientation)
+            if not ok:
+                return {"success": False, "error": "add_power_symbol returned False"}
+            result = {"success": True, "net_name": net_name, "position": position}
+            result.update(try_reload(sch_file))
+            return result
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_annotate_schematic(self, params: Dict) -> Dict:
         return self._sch_delegate(["annotate"], params)
@@ -1003,7 +1060,33 @@ class KiCADDispatcher:
         return self._sch_delegate(["rotate_component"], params)
 
     def _handle_delete_schematic_wire(self, params: Dict) -> Dict:
-        return self._sch_delegate(["delete_wire"], params)
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded"}
+        try:
+            from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
+
+            wire_id = params.get("wireId")
+            start = params.get("start")
+            end = params.get("end")
+
+            if wire_id:
+                ok = WireManager.delete_wire_by_uuid(sch_file, str(wire_id))
+            elif start and end:
+                s = [float(start[0]), float(start[1])]
+                e = [float(end[0]), float(end[1])]
+                ok = WireManager.delete_wire(sch_file, s, e)
+            else:
+                return {"success": False, "error": "Provide wireId (UUID) or start+end coordinates"}
+
+            if not ok:
+                return {"success": False, "error": "Wire not found"}
+            result = {"success": True}
+            result.update(try_reload(sch_file))
+            return result
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def _handle_delete_schematic_net_label(self, params: Dict) -> Dict:
         return self._sch_delegate(["delete_net_label"], params)

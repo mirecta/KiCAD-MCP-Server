@@ -441,6 +441,7 @@ class DynamicSymbolLoader:
         x: float = 0,
         y: float = 0,
         unit: int = 1,
+        angle: float = 0,
     ) -> bool:
         """
         Add a component instance to the schematic.
@@ -450,7 +451,7 @@ class DynamicSymbolLoader:
         full_lib_id = f"{library_name}:{symbol_name}"
         new_uuid = str(uuid.uuid4())
 
-        instance_block = f"""  (symbol (lib_id "{full_lib_id}") (at {x} {y} 0) (unit {unit})
+        instance_block = f"""  (symbol (lib_id "{full_lib_id}") (at {x} {y} {angle}) (unit {unit})
     (in_bom yes) (on_board yes) (dnp no)
     (uuid "{new_uuid}")
     (property "Reference" "{reference}" (at {x} {y - 2.54} 0)
@@ -542,6 +543,7 @@ class DynamicSymbolLoader:
         y: float = 0,
         unit: int = 1,
         project_path: Optional[Path] = None,
+        angle: float = 0,
     ) -> bool:
         """
         High-level: ensure symbol definition exists in schematic, then add an instance.
@@ -551,6 +553,7 @@ class DynamicSymbolLoader:
             unit: For multi-unit symbols, which unit to place (1=A, 2=B, …). Default 1.
             project_path: Optional project directory. When set, project-specific
                           sym-lib-table is also searched for the library file.
+            angle: Rotation angle in degrees (0, 90, 180, 270). Default 0.
         """
         if project_path:
             self.project_path = project_path
@@ -568,6 +571,7 @@ class DynamicSymbolLoader:
             x=x,
             y=y,
             unit=unit,
+            angle=angle,
         )
 
 

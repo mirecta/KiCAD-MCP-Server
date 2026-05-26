@@ -1630,6 +1630,11 @@ SCHEMATIC_TOOLS = [
                 },
                 "x": {"type": "number", "description": "X coordinate on schematic"},
                 "y": {"type": "number", "description": "Y coordinate on schematic"},
+                "orientation": {
+                    "type": "number",
+                    "description": "Rotation angle in degrees (0, 90, 180, 270). Default 0.",
+                    "default": 0,
+                },
             },
             "required": ["reference", "symbol", "x", "y"],
         },
@@ -1745,6 +1750,34 @@ SCHEMATIC_TOOLS = [
                 },
             },
             "required": ["schematicPath", "netName"],
+        },
+    },
+    {
+        "name": "add_schematic_power_symbol",
+        "title": "Add Power Symbol",
+        "description": (
+            "Place a KiCad power symbol (VCC, GND, +3V3, +5V, etc.) on the schematic. "
+            "PREFERRED: use componentRef + pinNumber to snap directly to a pin. "
+            "Power symbols create proper net connections — use these instead of net labels for power rails. "
+            "orientation: 0=pointing up (use for VCC/positive rails), 180=pointing down (use for GND)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "schematicPath": {"type": "string", "description": "Path to schematic file"},
+                "netName": {"type": "string", "description": "Power net name (e.g. VCC, GND, +3V3, +5V, VBAT)"},
+                "componentRef": {"type": "string", "description": "Snap to this component's pin (e.g. U1). Use with pinNumber."},
+                "pinNumber": {"type": ["string", "number"], "description": "Pin number or name to snap to."},
+                "position": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                    "description": "[x, y] position. Required if componentRef/pinNumber not given."
+                },
+                "orientation": {
+                    "type": "number", "default": 0,
+                    "description": "0=pointing up (VCC style), 180=pointing down (GND style)."
+                },
+            },
+            "required": ["netName"],
         },
     },
     {
@@ -2345,13 +2378,22 @@ ADDITIONAL_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "delete_schematic_wire",
         "title": "Delete Schematic Wire",
-        "description": "Delete a wire segment from the schematic.",
+        "description": "Delete a wire segment from the schematic. Provide wireId (UUID from add_schematic_wire response or list_schematic_wires) OR start+end coordinates.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "wireId": {"type": "string", "description": "Unique identifier of the wire to delete"},
+                "schematicPath": {"type": "string", "description": "Path to schematic file"},
+                "wireId": {"type": "string", "description": "UUID of the wire to delete (from prior wire response)"},
+                "start": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                    "description": "[x, y] start point of wire (alternative to wireId)"
+                },
+                "end": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                    "description": "[x, y] end point of wire (alternative to wireId)"
+                },
             },
-            "required": ["wireId"],
+            "required": [],
         },
     },
     {

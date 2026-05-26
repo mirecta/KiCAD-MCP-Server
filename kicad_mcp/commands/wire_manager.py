@@ -717,6 +717,120 @@ class WireManager:
         return added, removed
 
     @staticmethod
+    def add_power_symbol(
+        schematic_path: Path,
+        net_name: str,
+        position: List[float],
+        orientation: int = 0,
+    ) -> bool:
+        """
+        Add a KiCad power symbol (VCC/GND/+3V3 etc.) to the schematic.
+        Creates the lib_symbols entry and placed instance inline without
+        requiring the power library to be pre-installed.
+
+        net_name: e.g. "VCC", "GND", "+3V3", "+5V"
+        orientation: 0=pointing up (VCC style), 180=pointing down (GND style)
+        """
+        try:
+            with open(schematic_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            sch_data = sexpdata.loads(content)
+
+            full_lib_id = f"power:{net_name}"
+
+            # Check if lib_symbols already has this power symbol
+            lib_sym_section = None
+            for item in sch_data:
+                if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_LIB_SYMBOLS:
+                    lib_sym_section = item
+                    break
+
+            already_defined = False
+            if lib_sym_section:
+                for sym in lib_sym_section[1:]:
+                    if isinstance(sym, list) and len(sym) > 1 and str(sym[1]) == full_lib_id:
+                        already_defined = True
+                        break
+
+            if not already_defined and lib_sym_section is not None:
+                # Inject a minimal power symbol definition
+                # Pin at (0,0) pointing down (angle=270) with length 0 — the wire connects at origin
+                pin_angle = 270  # pin faces down, wire connects at top
+                sym_def_text = (
+                    f'(symbol "{full_lib_id}" (power) (pin_numbers hide) (pin_names (offset 0) hide) '
+                    f'(in_bom no) (on_board no) '
+                    f'(property "Reference" "#PWR" (at 0 -3.81 0) (effects (font (size 1.27 1.27)) (hide yes))) '
+                    f'(property "Value" "{net_name}" (at 0 3.81 0) (effects (font (size 1.27 1.27)))) '
+                    f'(property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes))) '
+                    f'(property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes))) '
+                    f'(symbol "{net_name}_0_1" '
+                    f'(pin power_in line (at 0 0 {pin_angle}) (length 0) '
+                    f'(name "{net_name}" (effects (font (size 1.27 1.27)))) '
+                    f'(number "1" (effects (font (size 1.27 1.27))))))'
+                    f')'
+                )
+                sym_def = sexpdata.loads(sym_def_text)
+                lib_sym_section.append(sym_def)
+
+            # Build placed instance
+            pwr_uuid = str(uuid.uuid4())
+            # Pick a sequential #PWR reference — count existing #PWR instances
+            pwr_count = sum(
+                1 for item in sch_data
+                if (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SYMBOL
+                    and any(
+                        isinstance(p, list) and len(p) >= 3
+                        and p[0] == Symbol("property")
+                        and str(p[1]).strip('"') == "Reference"
+                        and str(p[2]).strip('"').startswith("#PWR")
+                        for p in item[1:]
+                    ))
+            )
+            pwr_ref = f"#PWR{pwr_count + 1:02d}"
+
+            x, y = position[0], position[1]
+            instance_sexp_text = (
+                f'(symbol (lib_id "{full_lib_id}") (at {x} {y} {orientation}) (unit 1) '
+                f'(in_bom no) (on_board no) (dnp no) '
+                f'(uuid "{pwr_uuid}") '
+                f'(property "Reference" "{pwr_ref}" (at {x} {y - 2.54} 0) '
+                f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                f'(property "Value" "{net_name}" (at {x} {y - 1.27} 0) '
+                f'  (effects (font (size 1.27 1.27)))) '
+                f'(property "Footprint" "" (at {x} {y} 0) '
+                f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                f'(property "Datasheet" "" (at {x} {y} 0) '
+                f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                f'(instances (project "project" (path "/" (reference "{pwr_ref}") (unit 1)))))'
+            )
+            instance_sexp = sexpdata.loads(instance_sexp_text)
+
+            # Insert before sheet_instances
+            sheet_instances_index = None
+            for i, item in enumerate(sch_data):
+                if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
+                    sheet_instances_index = i
+                    break
+            if sheet_instances_index is None:
+                sheet_instances_index = len(sch_data)
+
+            sch_data.insert(sheet_instances_index, instance_sexp)
+
+            WireManager.sync_junctions(sch_data)
+
+            with open(schematic_path, "w", encoding="utf-8") as f:
+                f.write(sexpdata.dumps(sch_data))
+
+            logger.info(f"Added power symbol {net_name} at {position}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error adding power symbol: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+    @staticmethod
     def add_no_connect(schematic_path: Path, position: List[float]) -> bool:
         """
         Add a no-connect flag to the schematic
@@ -855,6 +969,32 @@ class WireManager:
             import traceback
 
             logger.error(traceback.format_exc())
+            return False
+
+    @staticmethod
+    def delete_wire_by_uuid(schematic_path: Path, wire_uuid: str) -> bool:
+        """Delete a wire from the schematic by its UUID."""
+        try:
+            with open(schematic_path, "r", encoding="utf-8") as f:
+                sch_content = f.read()
+            sch_data = sexpdata.loads(sch_content)
+            for i, item in enumerate(sch_data):
+                if not (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_WIRE):
+                    continue
+                for part in item[1:]:
+                    if (isinstance(part, list) and len(part) >= 2
+                            and part[0] == _SYM_UUID
+                            and str(part[1]).strip('"') == wire_uuid):
+                        del sch_data[i]
+                        WireManager.sync_junctions(sch_data)
+                        with open(schematic_path, "w", encoding="utf-8") as f:
+                            f.write(sexpdata.dumps(sch_data))
+                        logger.info(f"Deleted wire uuid={wire_uuid}")
+                        return True
+            logger.warning(f"No wire found with uuid={wire_uuid}")
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting wire by uuid: {e}")
             return False
 
     @staticmethod
