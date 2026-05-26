@@ -307,10 +307,9 @@ class PinLocator:
             if mirror_y:
                 pin_def_angle = (180 - pin_def_angle) % 360
 
-            # eeschema's rotation TRANSFORM is screen-CCW in Y-down, which is
-            # math-CW in standard atan2 convention — so subtract the rotation
-            # to match `pin_world_xy`'s `_rotate(..., -rotation)` call.
-            absolute_angle = (pin_def_angle - symbol_rotation) % 360
+            # pin_world_xy applies _rotate(..., -rotation) which is CW in screen.
+            # For angles: CW screen rotation by R maps angle θ → θ + R (mod 360).
+            absolute_angle = (pin_def_angle + symbol_rotation) % 360
             return absolute_angle
 
         except Exception:
