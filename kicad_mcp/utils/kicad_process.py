@@ -137,17 +137,26 @@ class KiCADProcessManager:
             return False
 
     @staticmethod
-    def get_executable_path() -> Optional[Path]:
+    def get_executable_path(file_path: Optional[Path] = None) -> Optional[Path]:
         """
-        Get path to KiCAD executable
+        Get path to the appropriate KiCAD executable for the given file type.
 
-        Returns:
-            Path to pcbnew/kicad executable, or None if not found
+        - .kicad_sch  → eeschema (schematic editor)
+        - .kicad_pcb  → pcbnew  (PCB editor)
+        - .kicad_pro or None → kicad (project manager)
         """
         system = platform.system()
+        suffix = file_path.suffix.lower() if file_path else ""
+
+        if suffix == ".kicad_sch":
+            preferred = ["eeschema", "kicad"]
+        elif suffix == ".kicad_pcb":
+            preferred = ["pcbnew", "kicad"]
+        else:
+            preferred = ["kicad", "pcbnew"]
 
         # Try to find executable in PATH first
-        for cmd in ["pcbnew", "kicad"]:
+        for cmd in preferred:
             result = subprocess.run(
                 ["which", cmd] if system != "Windows" else ["where", cmd],
                 capture_output=True,
@@ -163,21 +172,22 @@ class KiCADProcessManager:
 
         # Platform-specific default paths
         if system == "Linux":
-            candidates = [
-                Path("/usr/bin/pcbnew"),
-                Path("/usr/local/bin/pcbnew"),
-                Path("/usr/bin/kicad"),
-            ]
-        elif system == "Darwin":  # macOS
+            if suffix == ".kicad_sch":
+                candidates = [Path("/usr/bin/eeschema"), Path("/usr/bin/kicad")]
+            elif suffix == ".kicad_pcb":
+                candidates = [Path("/usr/bin/pcbnew"), Path("/usr/local/bin/pcbnew"), Path("/usr/bin/kicad")]
+            else:
+                candidates = [Path("/usr/bin/kicad"), Path("/usr/bin/pcbnew")]
+        elif system == "Darwin":
             candidates = [
                 Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad"),
                 Path("/Applications/KiCad/pcbnew.app/Contents/MacOS/pcbnew"),
             ]
         elif system == "Windows":
             candidates = [
+                Path("C:/Program Files/KiCad/9.0/bin/kicad.exe"),
                 Path("C:/Program Files/KiCad/9.0/bin/pcbnew.exe"),
-                Path("C:/Program Files/KiCad/8.0/bin/pcbnew.exe"),
-                Path("C:/Program Files (x86)/KiCad/9.0/bin/pcbnew.exe"),
+                Path("C:/Program Files/KiCad/8.0/bin/kicad.exe"),
             ]
         else:
             candidates = []
@@ -193,14 +203,11 @@ class KiCADProcessManager:
     @staticmethod
     def launch(project_path: Optional[Path] = None, wait_for_start: bool = True) -> bool:
         """
-        Launch KiCAD PCB Editor
+        Launch the appropriate KiCAD editor for the given file.
 
-        Args:
-            project_path: Optional path to .kicad_pcb file to open
-            wait_for_start: Wait for process to start before returning
-
-        Returns:
-            True if launch successful, False otherwise
+        - .kicad_sch  → eeschema
+        - .kicad_pcb  → pcbnew
+        - .kicad_pro or None → kicad (project manager)
         """
         try:
             # Check if already running
@@ -208,8 +215,8 @@ class KiCADProcessManager:
                 logger.info("KiCAD is already running")
                 return True
 
-            # Find executable
-            exe_path = KiCADProcessManager.get_executable_path()
+            # Find executable appropriate for the file type
+            exe_path = KiCADProcessManager.get_executable_path(project_path)
             if not exe_path:
                 logger.error("Cannot launch KiCAD: executable not found")
                 return False
