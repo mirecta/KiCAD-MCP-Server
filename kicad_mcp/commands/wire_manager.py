@@ -680,6 +680,19 @@ class WireManager:
             (round(x * _IU_PER_MM), round(y * _IU_PER_MM)) for x, y in pin_positions
         )
 
+        # Detect pins that lie on the interior of a wire (T-junction from wire side).
+        # A wire passing through a pin has no endpoint there, so wire_iu would be 0.
+        # Adding 2 makes total = 2 (wire interior) + 1 (pin) = 3, triggering a junction.
+        for item in sch_data:
+            parsed = WireManager._parse_wire(item)
+            if parsed is None:
+                continue
+            (x1, y1), (x2, y2), _, _ = parsed
+            for px, py in pin_positions:
+                if WireManager._point_strictly_on_wire(px, py, x1, y1, x2, y2):
+                    iu = (round(px * _IU_PER_MM), round(py * _IU_PER_MM))
+                    wire_iu[iu] += 2  # both sides of T represented
+
         # wire_iu.items() guarantees wire_cnt >= 1, so no extra guard needed
         needed_iu = {iu for iu, wire_cnt in wire_iu.items() if wire_cnt + pin_iu.get(iu, 0) >= 3}
 

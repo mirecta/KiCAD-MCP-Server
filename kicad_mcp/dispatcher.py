@@ -907,7 +907,12 @@ class KiCADDispatcher:
 
             inner = []
             if abs(ex - ax) > 1e-4 and abs(ey - ay) > 1e-4:
-                inner = [[ax, ey]]  # H-first corner between escape and approach
+                # Corner direction: match the escape axis so the first turn
+                # moves perpendicular to the escape stub, avoiding the source component.
+                if fd[1] != 0:    # escaping vertically → turn H first toward ax
+                    inner = [[ax, ey]]
+                else:              # escaping horizontally → turn V first toward ay
+                    inner = [[ex, ay]]
 
             raw = [p1, esc] + inner + [app, p2]
 
