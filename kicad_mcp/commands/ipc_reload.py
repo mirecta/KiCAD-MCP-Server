@@ -10,7 +10,6 @@ Requirements:
   - KiCAD must be running
   - IPC API server must be enabled:
       KiCAD menu → Preferences → Plugins → Enable IPC API Server
-    OR set env var KICAD_ENABLE_SCRIPTING_SERVER=1 before launching KiCAD.
 
 If KiCAD is not running or IPC is unavailable the call silently returns False
 and callers carry on — schematic file is still correctly written to disk.
@@ -31,17 +30,22 @@ _kicad_client = None
 def _get_kicad() -> Optional[object]:
     """Return a live KiCad IPC client, or None if unavailable."""
     global _kicad_client
-    try:
-        if _kicad_client is not None:
-            _kicad_client.ping()
+    # Verify cached client is still alive with a lightweight call
+    if _kicad_client is not None:
+        try:
+            from kipy.proto.common.types.base_types_pb2 import DOCTYPE_SCHEMATIC
+            _kicad_client.get_open_documents(DOCTYPE_SCHEMATIC)
             return _kicad_client
-    except Exception:
-        _kicad_client = None
+        except Exception:
+            _kicad_client = None
 
     try:
         from kipy.kicad import KiCad
+        from kipy.proto.common.types.base_types_pb2 import DOCTYPE_SCHEMATIC
         client = KiCad()
-        client.ping()
+        # Use get_open_documents as the health check — ping() fails on KiCAD 10
+        # because the Ping command type is not registered in that API version.
+        client.get_open_documents(DOCTYPE_SCHEMATIC)
         _kicad_client = client
         logger.info("Connected to KiCAD IPC API")
         return client
