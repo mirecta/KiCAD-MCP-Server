@@ -980,6 +980,7 @@ class KiCADDispatcher:
         component_ref = params.get("componentRef")
         pin_number = params.get("pinNumber")
         position = params.get("position")
+        orientation_explicit = "orientation" in params
         snapped_to_pin = None
 
         if component_ref and pin_number is not None:
@@ -992,6 +993,12 @@ class KiCADDispatcher:
                             "error": f"Pin {component_ref}.{pin_number} not found"}
                 position = [pos[0], pos[1]]
                 snapped_to_pin = {"reference": component_ref, "pin": str(pin_number)}
+                # Auto-orient label away from component body unless caller overrides
+                if not orientation_explicit:
+                    angle = locator.get_pin_angle(sch_file, component_ref, str(pin_number))
+                    if angle is not None:
+                        # Label orientation matches pin exit angle so text extends outward
+                        orientation = int(round(angle / 90) * 90) % 360
             except Exception as exc:
                 logger.exception("pin lookup failed")
                 return {"success": False, "error": f"pin lookup failed: {exc}"}
