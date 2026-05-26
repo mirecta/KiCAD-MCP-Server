@@ -716,6 +716,97 @@ class WireManager:
             logger.info(f"sync_junctions: added {added}, removed {removed}")
         return added, removed
 
+    # Graphical bodies for common power symbols.
+    # Coordinates are in KiCAD symbol-lib Y-up convention (positive Y = up).
+    # KiCAD applies a Y-mirror when placing into the schematic, so a body at
+    # y>0 in the lib appears *above* the pin on-screen (correct for VCC/+5V).
+    # GND polyline goes to y<0 in lib → appears *below* pin on-screen.
+    # Sub-symbol names must NOT include the "power:" lib prefix —
+    # KiCAD uses bare names like "VCC_0_1" inside the parent "(symbol power:VCC ...)".
+    _PWR_SYM_BODIES: dict = {
+        # VCC / supply rails: vertical line + upward-pointing triangle
+        # Pin at angle 90 → connects from below (component pin below VCC symbol) ✓
+        "VCC": (
+            '(symbol "VCC_0_1" '
+            '(polyline (pts (xy 0 0) (xy 0 1.27)) '
+            '  (stroke (width 0) (type default)) (fill (type none))) '
+            '(polyline (pts (xy -0.762 1.27) (xy 0 2.54) (xy 0.762 1.27)) '
+            '  (stroke (width 0) (type default)) (fill (type none))) '
+            '(pin power_in line (at 0 0 90) (length 0) '
+            '  (name "VCC" (effects (font (size 1.27 1.27)))) '
+            '  (number "1" (effects (font (size 1.27 1.27))))))'
+        ),
+        # GND: line + downward V-shape chevron
+        # Pin at angle 270 → connects from above (component pin above GND symbol) ✓
+        "GND": (
+            '(symbol "GND_0_1" '
+            '(polyline (pts (xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)) '
+            '  (stroke (width 0) (type default)) (fill (type none))) '
+            '(pin power_in line (at 0 0 270) (length 0) '
+            '  (name "GND" (effects (font (size 1.27 1.27)))) '
+            '  (number "1" (effects (font (size 1.27 1.27))))))'
+        ),
+    }
+
+    @staticmethod
+    def _load_power_sym_from_kicad_lib(net_name: str) -> Optional[str]:
+        """
+        Return a lib_symbols-compatible symbol definition for net_name.
+
+        Uses the known-good graphical bodies for VCC and GND; for other nets
+        falls back to a generic supply-style symbol.  The definition uses
+        (in_bom no)(on_board no) as required for embedded lib_symbols entries.
+        """
+        full_id = f"power:{net_name}"
+        gnd_kw = ("GND", "AGND", "DGND", "GNDA", "PGND", "EARTH", "VSS")
+        is_gnd = any(k in net_name.upper() for k in gnd_kw)
+
+        # Choose body: exact match first, then GND/VCC family, then generic supply
+        if net_name in WireManager._PWR_SYM_BODIES:
+            body = WireManager._PWR_SYM_BODIES[net_name]
+        elif is_gnd:
+            # Re-use GND body with the actual net_name
+            body = WireManager._PWR_SYM_BODIES["GND"].replace(
+                '"GND"', f'"{net_name}"'
+            ).replace("GND_0_1", f"{net_name}_0_1")
+        else:
+            # Generic supply — reuse VCC body
+            body = WireManager._PWR_SYM_BODIES["VCC"].replace(
+                '"VCC"', f'"{net_name}"'
+            ).replace("VCC_0_1", f"{net_name}_0_1")
+
+        label_y_sym = -3.81 if is_gnd else 3.556  # Y-up symbol coords
+        ref_y_sym = label_y_sym - 2.54
+
+        return (
+            f'(symbol "{full_id}" (power) (pin_numbers hide) '
+            f'(pin_names (offset 0) hide) (in_bom no) (on_board no) '
+            f'(property "Reference" "#PWR" (at 0 {ref_y_sym} 0) '
+            f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(property "Value" "{net_name}" (at 0 {label_y_sym} 0) '
+            f'  (effects (font (size 1.27 1.27)))) '
+            f'(property "Footprint" "" (at 0 0 0) '
+            f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(property "Datasheet" "" (at 0 0 0) '
+            f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+            f'{body})'
+        )
+
+    @staticmethod
+    def _power_sym_label_offset(net_name: str) -> float:
+        """
+        Return the y-offset (in schematic coords, Y-down) for the Value label
+        relative to the pin position.  Positive = below pin, negative = above pin.
+
+        In KiCAD symbol libs Y is UP, so a lib 'at 0 +3.556' for VCC means 3.556 mm
+        above the pin → schematic offset = -3.556 (above).
+        GND has 'at 0 -3.81' → schematic offset = +3.81 (below).
+        """
+        gnd_keywords = ("GND", "AGND", "DGND", "GNDA", "GNDD", "PGND", "EARTH", "VSS")
+        if any(k in net_name.upper() for k in gnd_keywords):
+            return +3.81   # below pin
+        return -3.556      # above pin (VCC / +5V / +3V3 …)
+
     @staticmethod
     def add_power_symbol(
         schematic_path: Path,
@@ -724,12 +815,13 @@ class WireManager:
         orientation: int = 0,
     ) -> bool:
         """
-        Add a KiCad power symbol (VCC/GND/+3V3 etc.) to the schematic.
-        Creates the lib_symbols entry and placed instance inline without
-        requiring the power library to be pre-installed.
+        Add a KiCad power symbol (VCC, GND, +3V3, +5V …) to the schematic.
 
-        net_name: e.g. "VCC", "GND", "+3V3", "+5V"
-        orientation: 0=pointing up (VCC style), 180=pointing down (GND style)
+        Loads the complete symbol definition from the KiCAD standard power library
+        so graphical direction is always correct.  The *orientation* parameter is
+        accepted for API compatibility but is ignored — the correct orientation is
+        always 0 for both VCC-style and GND-style symbols because each symbol's
+        body already points in the right direction naturally.
         """
         try:
             with open(schematic_path, "r", encoding="utf-8") as f:
@@ -738,7 +830,7 @@ class WireManager:
 
             full_lib_id = f"power:{net_name}"
 
-            # Check if lib_symbols already has this power symbol
+            # ── lib_symbols: insert definition if not present ──────────────────
             lib_sym_section = None
             for item in sch_data:
                 if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_LIB_SYMBOLS:
@@ -753,49 +845,67 @@ class WireManager:
                         break
 
             if not already_defined and lib_sym_section is not None:
-                # Inject a minimal power symbol definition
-                # Pin at (0,0) pointing down (angle=270) with length 0 — the wire connects at origin
-                pin_angle = 270  # pin faces down, wire connects at top
-                sym_def_text = (
-                    f'(symbol "{full_lib_id}" (power) (pin_numbers hide) (pin_names (offset 0) hide) '
-                    f'(in_bom no) (on_board no) '
-                    f'(property "Reference" "#PWR" (at 0 -3.81 0) (effects (font (size 1.27 1.27)) (hide yes))) '
-                    f'(property "Value" "{net_name}" (at 0 3.81 0) (effects (font (size 1.27 1.27)))) '
-                    f'(property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes))) '
-                    f'(property "Datasheet" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes))) '
-                    f'(symbol "{net_name}_0_1" '
-                    f'(pin power_in line (at 0 0 {pin_angle}) (length 0) '
-                    f'(name "{net_name}" (effects (font (size 1.27 1.27)))) '
-                    f'(number "1" (effects (font (size 1.27 1.27))))))'
-                    f')'
-                )
-                sym_def = sexpdata.loads(sym_def_text)
-                lib_sym_section.append(sym_def)
+                # Try to load the real definition from KiCAD's power library
+                sym_block_text = WireManager._load_power_sym_from_kicad_lib(net_name)
+                if sym_block_text is None:
+                    # Fallback minimal definition — pin angle 90 for supply, 270 for GND
+                    gnd_kw = ("GND", "AGND", "DGND", "GNDA", "PGND", "EARTH", "VSS")
+                    is_gnd = any(k in net_name.upper() for k in gnd_kw)
+                    pin_angle = 270 if is_gnd else 90
+                    label_y_sym = -3.81 if is_gnd else 3.556  # symbol Y-up coords
+                    sym_block_text = (
+                        f'(symbol "{full_lib_id}" (power) (pin_numbers hide) '
+                        f'(pin_names (offset 0) hide) (in_bom no) (on_board no) '
+                        f'(property "Reference" "#PWR" (at 0 -3.81 0) '
+                        f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                        f'(property "Value" "{net_name}" (at 0 {label_y_sym} 0) '
+                        f'  (effects (font (size 1.27 1.27)))) '
+                        f'(property "Footprint" "" (at 0 0 0) '
+                        f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                        f'(property "Datasheet" "" (at 0 0 0) '
+                        f'  (effects (font (size 1.27 1.27)) (hide yes))) '
+                        f'(symbol "{net_name}_0_1" '
+                        f'(pin power_in line (at 0 0 {pin_angle}) (length 0) '
+                        f'(name "{net_name}" (effects (font (size 1.27 1.27)))) '
+                        f'(number "1" (effects (font (size 1.27 1.27)))))))'
+                    )
+                lib_sym_section.append(sexpdata.loads(sym_block_text))
 
-            # Build placed instance
+            # ── placed instance ────────────────────────────────────────────────
             pwr_uuid = str(uuid.uuid4())
-            # Pick a sequential #PWR reference — count existing #PWR instances
             pwr_count = sum(
                 1 for item in sch_data
-                if (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SYMBOL
+                if (
+                    isinstance(item, list)
+                    and len(item) > 0
+                    and item[0] == _SYM_SYMBOL
                     and any(
-                        isinstance(p, list) and len(p) >= 3
+                        isinstance(p, list)
+                        and len(p) >= 3
                         and p[0] == Symbol("property")
                         and str(p[1]).strip('"') == "Reference"
                         and str(p[2]).strip('"').startswith("#PWR")
                         for p in item[1:]
-                    ))
+                    )
+                )
             )
             pwr_ref = f"#PWR{pwr_count + 1:02d}"
 
             x, y = position[0], position[1]
+            # Always place at orientation 0 — symbol bodies point naturally:
+            #   VCC body extends upward from pin   (pin angle=90  in lib)
+            #   GND body extends downward from pin (pin angle=270 in lib)
+            place_angle = 0
+            label_y = y + WireManager._power_sym_label_offset(net_name)
+            ref_y = label_y - 1.27
+
             instance_sexp_text = (
-                f'(symbol (lib_id "{full_lib_id}") (at {x} {y} {orientation}) (unit 1) '
+                f'(symbol (lib_id "{full_lib_id}") (at {x} {y} {place_angle}) (unit 1) '
                 f'(in_bom no) (on_board no) (dnp no) '
                 f'(uuid "{pwr_uuid}") '
-                f'(property "Reference" "{pwr_ref}" (at {x} {y - 2.54} 0) '
+                f'(property "Reference" "{pwr_ref}" (at {x} {ref_y} 0) '
                 f'  (effects (font (size 1.27 1.27)) (hide yes))) '
-                f'(property "Value" "{net_name}" (at {x} {y - 1.27} 0) '
+                f'(property "Value" "{net_name}" (at {x} {label_y} 0) '
                 f'  (effects (font (size 1.27 1.27)))) '
                 f'(property "Footprint" "" (at {x} {y} 0) '
                 f'  (effects (font (size 1.27 1.27)) (hide yes))) '
@@ -805,7 +915,6 @@ class WireManager:
             )
             instance_sexp = sexpdata.loads(instance_sexp_text)
 
-            # Insert before sheet_instances
             sheet_instances_index = None
             for i, item in enumerate(sch_data):
                 if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
@@ -815,7 +924,6 @@ class WireManager:
                 sheet_instances_index = len(sch_data)
 
             sch_data.insert(sheet_instances_index, instance_sexp)
-
             WireManager.sync_junctions(sch_data)
 
             with open(schematic_path, "w", encoding="utf-8") as f:

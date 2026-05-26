@@ -1759,7 +1759,8 @@ SCHEMATIC_TOOLS = [
             "Place a KiCad power symbol (VCC, GND, +3V3, +5V, etc.) on the schematic. "
             "PREFERRED: use componentRef + pinNumber to snap directly to a pin. "
             "Power symbols create proper net connections — use these instead of net labels for power rails. "
-            "orientation: 0=pointing up (use for VCC/positive rails), 180=pointing down (use for GND)."
+            "Do NOT specify orientation — direction is determined automatically from the net name "
+            "(VCC/supply symbols point away from pin upward; GND symbols point away downward)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1774,7 +1775,7 @@ SCHEMATIC_TOOLS = [
                 },
                 "orientation": {
                     "type": "number", "default": 0,
-                    "description": "0=pointing up (VCC style), 180=pointing down (GND style)."
+                    "description": "Ignored — direction is auto-determined from netName. Do not set."
                 },
             },
             "required": ["netName"],
