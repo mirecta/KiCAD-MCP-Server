@@ -295,6 +295,7 @@ class WireManager:
         position: List[float],
         label_type: str = "label",
         orientation: int = 0,
+        shape: str = "bidirectional",
     ) -> bool:
         """
         Add a net label to the schematic
@@ -305,6 +306,7 @@ class WireManager:
             position: [x, y] coordinates for label
             label_type: Type of label ('label', 'global_label', 'hierarchical_label')
             orientation: Rotation angle (0, 90, 180, 270)
+            shape: Shape for global/hierarchical labels (bidirectional, input, output, …)
 
         Returns:
             True if successful, False otherwise
@@ -322,6 +324,11 @@ class WireManager:
                 Symbol(label_type),
                 text,
                 [Symbol("at"), position[0], position[1], orientation],
+            ]
+            # global_label and hierarchical_label require a shape field
+            if label_type in ("global_label", "hierarchical_label"):
+                label_sexp.append([Symbol("shape"), Symbol(shape)])
+            label_sexp += [
                 [
                     Symbol("effects"),
                     [Symbol("font"), [Symbol("size"), 1.27, 1.27]],

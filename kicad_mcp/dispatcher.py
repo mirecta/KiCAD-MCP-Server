@@ -983,6 +983,11 @@ class KiCADDispatcher:
         orientation_explicit = "orientation" in params
         snapped_to_pin = None
 
+        import math
+        # stub_mm: length of wire between pin tip and label connection point
+        _STUB_MM = float(params.get("stubLength", 2.54))
+        pin_tip = None  # original pin tip position, used to draw stub wire
+
         if component_ref and pin_number is not None:
             try:
                 from kicad_mcp.commands.pin_locator import PinLocator
@@ -991,14 +996,20 @@ class KiCADDispatcher:
                 if pos is None:
                     return {"success": False,
                             "error": f"Pin {component_ref}.{pin_number} not found"}
-                position = [pos[0], pos[1]]
-                snapped_to_pin = {"reference": component_ref, "pin": str(pin_number)}
+                pin_tip = [pos[0], pos[1]]
                 # Auto-orient label away from component body unless caller overrides
                 if not orientation_explicit:
                     angle = locator.get_pin_angle(sch_file, component_ref, str(pin_number))
                     if angle is not None:
-                        # Label orientation matches pin exit angle so text extends outward
                         orientation = int(round(angle / 90) * 90) % 360
+                # Offset label by stub length along pin exit direction so it
+                # sits outside the component body with a visible wire stub.
+                angle_rad = math.radians(orientation)
+                dx = round(math.cos(angle_rad) * _STUB_MM, 4)
+                # KiCAD Y increases downward; angle 90° = screen-up = -y
+                dy = round(-math.sin(angle_rad) * _STUB_MM, 4)
+                position = [pin_tip[0] + dx, pin_tip[1] + dy]
+                snapped_to_pin = {"reference": component_ref, "pin": str(pin_number)}
             except Exception as exc:
                 logger.exception("pin lookup failed")
                 return {"success": False, "error": f"pin lookup failed: {exc}"}
@@ -1013,8 +1024,13 @@ class KiCADDispatcher:
         try:
             from kicad_mcp.commands.wire_manager import WireManager
             from kicad_mcp.commands.ipc_reload import try_reload
+            # Draw stub wire from pin tip to label connection point
+            if pin_tip is not None and _STUB_MM > 0:
+                WireManager.add_wire(sch_file, pin_tip, pos)
+            shape = params.get("shape", "bidirectional")
             ok = WireManager.add_label(sch_file, net_name, pos,
-                                       label_type=label_type, orientation=orientation)
+                                       label_type=label_type, orientation=orientation,
+                                       shape=shape)
             if not ok:
                 return {"success": False, "error": "WireManager.add_label returned False"}
             result = {
