@@ -51,3 +51,39 @@ def clear_pending(sch_path: str | Path) -> None:
     sc = _sidecar(sch_path)
     if sc.exists():
         sc.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Staged-component tracking (components placed without explicit coordinates)
+# ---------------------------------------------------------------------------
+
+def _staged_sidecar(sch_path: str | Path) -> Path:
+    p = Path(sch_path)
+    return p.with_name(p.stem + ".staged.json")
+
+
+def load_staged_refs(sch_path: str | Path) -> List[str]:
+    sc = _staged_sidecar(sch_path)
+    if not sc.exists():
+        return []
+    try:
+        data = json.loads(sc.read_text(encoding="utf-8"))
+        return data.get("staged", [])
+    except Exception as exc:
+        logger.warning(f"Failed to read staged refs {sc}: {exc}")
+        return []
+
+
+def add_staged_ref(sch_path: str | Path, ref: str) -> None:
+    existing = load_staged_refs(sch_path)
+    if ref not in existing:
+        existing.append(ref)
+        _staged_sidecar(sch_path).write_text(
+            json.dumps({"staged": existing}, indent=2), encoding="utf-8"
+        )
+
+
+def clear_staged_refs(sch_path: str | Path) -> None:
+    sc = _staged_sidecar(sch_path)
+    if sc.exists():
+        sc.unlink()

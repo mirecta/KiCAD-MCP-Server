@@ -693,9 +693,16 @@ class KiCADDispatcher:
         reference = params.get("reference", "X?")
         value = params.get("value") or sym_name
         footprint = params.get("footprint", "")
+        auto_place = params.get("x") is None and params.get("y") is None
         try:
-            x = float(params.get("x", 0))
-            y = float(params.get("y", 0))
+            if auto_place:
+                from kicad_mcp.commands.connection_registry import load_staged_refs
+                idx = len(load_staged_refs(sch_file))
+                from kicad_mcp.commands.placer import staging_position
+                x, y = staging_position(idx)
+            else:
+                x = float(params.get("x", 0))
+                y = float(params.get("y", 0))
             unit = int(params.get("unit", 1))
         except (TypeError, ValueError) as exc:
             return {"success": False, "error": f"invalid numeric arg: {exc}"}
@@ -716,12 +723,16 @@ class KiCADDispatcher:
             if not ok:
                 return {"success": False,
                         "error": "DynamicSymbolLoader.add_component returned False"}
+            if auto_place:
+                from kicad_mcp.commands.connection_registry import add_staged_ref
+                add_staged_ref(sch_file, reference)
             result = {
                 "success": True,
                 "reference": reference,
                 "symbol": symbol,
                 "value": value,
                 "position": [x, y],
+                "auto_placed": auto_place,
                 "schematic": str(sch_file),
             }
             result.update(try_reload(sch_file))
@@ -855,17 +866,28 @@ class KiCADDispatcher:
             return {"success": False, "error": "No schematic loaded."}
         clear = params.get("clearPending", True)
         try:
-            from kicad_mcp.commands.connection_registry import load_pending, clear_pending
+            from kicad_mcp.commands.connection_registry import (
+                load_pending, clear_pending,
+                load_staged_refs, clear_staged_refs,
+            )
             from kicad_mcp.commands.router import route_all
             from kicad_mcp.commands.wire_manager import WireManager
             from kicad_mcp.commands.ipc_reload import try_reload
+            from kicad_mcp.commands.placer import place_and_move
+            from kicad_mcp.commands.pin_locator import PinLocator
 
             connections = load_pending(sch_file)
             if not connections:
                 return {"success": True, "routed": 0, "skipped": 0,
+                        "placed": 0,
                         "note": "No pending connections to route.",
                         "schematic": str(sch_file)}
 
+            # Phase 1 — auto-place staged components
+            locator = PinLocator()
+            placed_count = place_and_move(sch_file, connections, locator)
+
+            # Phase 2 — route all queued connections
             routed_list = route_all(sch_file, connections)
             routed = skipped = 0
             for conn, pts in routed_list:
@@ -883,9 +905,11 @@ class KiCADDispatcher:
 
             if clear:
                 clear_pending(sch_file)
+                clear_staged_refs(sch_file)
 
             result: Dict = {
                 "success": True,
+                "placed":  placed_count,
                 "routed":  routed,
                 "skipped": skipped,
                 "schematic": str(sch_file),

@@ -1612,7 +1612,13 @@ SCHEMATIC_TOOLS = [
     {
         "name": "add_schematic_component",
         "title": "Add Component to Schematic",
-        "description": "Places a symbol (resistor, capacitor, IC, etc.) on the schematic.",
+        "description": (
+            "Places a symbol (resistor, capacitor, IC, etc.) on the schematic. "
+            "x and y are OPTIONAL — omit them to let optimize_schematic auto-place the "
+            "component. Preferred workflow: add all components (no coords), queue all "
+            "connections with add_schematic_wire, then call optimize_schematic once to "
+            "auto-layout and route everything."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1628,15 +1634,21 @@ SCHEMATIC_TOOLS = [
                     "type": "string",
                     "description": "Component value (e.g., 10k, 0.1uF)",
                 },
-                "x": {"type": "number", "description": "X coordinate on schematic"},
-                "y": {"type": "number", "description": "Y coordinate on schematic"},
+                "x": {
+                    "type": "number",
+                    "description": "X coordinate on schematic. Omit to auto-place via optimize_schematic.",
+                },
+                "y": {
+                    "type": "number",
+                    "description": "Y coordinate on schematic. Omit to auto-place via optimize_schematic.",
+                },
                 "orientation": {
                     "type": "number",
                     "description": "Rotation angle in degrees (0, 90, 180, 270). Default 0.",
                     "default": 0,
                 },
             },
-            "required": ["reference", "symbol", "x", "y"],
+            "required": ["reference", "symbol"],
         },
     },
     {
