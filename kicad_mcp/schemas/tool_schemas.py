@@ -1641,14 +1641,15 @@ SCHEMATIC_TOOLS = [
     },
     {
         "name": "add_schematic_wire",
-        "title": "Draw Wire Between Pins",
+        "title": "Queue Wire Connection Between Pins",
         "description": (
-            "Draws a wire connecting two schematic pins. "
-            "PREFERRED: use fromRef/fromPin/toRef/toPin to connect by component reference and pin number "
-            "— the server resolves the exact coordinates automatically. "
-            "Example: {fromRef:'R1', fromPin:'2', toRef:'R2', toPin:'1'} connects R1 pin 2 to R2 pin 1. "
-            "Add optional 'via' waypoints [[x,y],...] to route around obstacles. "
-            "ALTERNATIVE: supply raw 'waypoints' [[x1,y1],[x2,y2],...] if you already know the coordinates. "
+            "Queue a wire connection between two schematic pins for later batch routing. "
+            "PREFERRED: use fromRef/fromPin/toRef/toPin — stores the connection and returns "
+            "queued:true. Call optimize_schematic afterwards to route all queued connections "
+            "at once with global layout awareness. "
+            "Example: {fromRef:'R1', fromPin:'2', toRef:'R2', toPin:'1'}. "
+            "ALTERNATIVE: supply raw 'waypoints' [[x1,y1],[x2,y2],...] to draw immediately "
+            "(bypasses queuing, useful for manual precise wiring). "
             "Pin references accept pin numbers ('1','2') or pin names ('GND','VCC','SDA')."
         ),
         "inputSchema": {
@@ -1694,6 +1695,32 @@ SCHEMATIC_TOOLS = [
                         "maxItems": 2,
                     },
                     "minItems": 2,
+                },
+            },
+            "required": ["schematicPath"],
+        },
+    },
+    {
+        "name": "optimize_schematic",
+        "title": "Route All Pending Wire Connections",
+        "description": (
+            "Route all wire connections queued by add_schematic_wire in one global pass. "
+            "Reads the pending connections sidecar, resolves all pin positions and exit angles, "
+            "sorts by distance (short first), then routes every connection with direction-aware "
+            "Manhattan routing and writes them all to the schematic at once. "
+            "Call this after queuing all your add_schematic_wire connections."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "schematicPath": {
+                    "type": "string",
+                    "description": "Path to schematic file",
+                },
+                "clearPending": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Clear the pending connections sidecar after routing (default true).",
                 },
             },
             "required": ["schematicPath"],

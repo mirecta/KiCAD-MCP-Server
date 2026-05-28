@@ -251,6 +251,7 @@ class KiCADDispatcher:
             "remove_schematic_component_property": self._handle_remove_schematic_component_property,
             "get_schematic_component":  self._handle_get_schematic_component,
             "add_schematic_wire":       self._handle_add_schematic_wire,
+            "optimize_schematic":       self._handle_optimize_schematic,
             "add_schematic_net_label":  self._handle_add_schematic_net_label,
             "add_no_connect":           self._handle_add_no_connect,
             "add_schematic_hierarchical_label": self._handle_add_schematic_hierarchical_label,
@@ -792,159 +793,45 @@ class KiCADDispatcher:
 
         from_ref = params.get("fromRef")
         from_pin = params.get("fromPin")
-        to_ref = params.get("toRef")
-        to_pin = params.get("toPin")
-        via_points = params.get("via") or []  # optional intermediate waypoints
+        to_ref   = params.get("toRef")
+        to_pin   = params.get("toPin")
 
         if from_ref and from_pin is not None and to_ref and to_pin is not None:
-            # Reference-based mode: resolve pin coordinates automatically
-            try:
-                from kicad_mcp.commands.pin_locator import PinLocator
-                locator = PinLocator()
-                start = locator.get_pin_location(sch_file, from_ref, str(from_pin))
-                if start is None:
-                    return {"success": False,
-                            "error": f"Pin {from_ref}/{from_pin} not found in schematic"}
-                end = locator.get_pin_location(sch_file, to_ref, str(to_pin))
-                if end is None:
-                    return {"success": False,
-                            "error": f"Pin {to_ref}/{to_pin} not found in schematic"}
-            except Exception as exc:
-                logger.exception("pin lookup failed in add_schematic_wire")
-                return {"success": False, "error": f"pin lookup failed: {exc}"}
-
-            try:
-                via_pts = [[float(p[0]), float(p[1])] for p in via_points]
-            except (TypeError, ValueError, IndexError) as exc:
-                return {"success": False, "error": f"invalid via waypoints: {exc}"}
-
-            # Resolve pin angles for direction-aware routing (only when no manual vias)
-            from_angle = None
-            to_angle = None
-            if not via_pts:
-                try:
-                    from_angle = locator.get_pin_angle(sch_file, from_ref, str(from_pin))
-                    to_angle = locator.get_pin_angle(sch_file, to_ref, str(to_pin))
-                except Exception:
-                    pass
-
-            resolved_pins = {
-                "from": {"ref": from_ref, "pin": str(from_pin), "position": start},
-                "to":   {"ref": to_ref,   "pin": str(to_pin),   "position": end},
+            # Reference-based mode → queue the connection; draw later via optimize_schematic
+            conn = {
+                "fromRef": from_ref,
+                "fromPin": str(from_pin),
+                "toRef":   to_ref,
+                "toPin":   str(to_pin),
             }
-        else:
-            # Coordinate-based mode (original API)
-            waypoints = params.get("waypoints") or []
-            if len(waypoints) < 2:
-                return {"success": False,
-                        "error": "Provide either fromRef/fromPin/toRef/toPin, "
-                                 "or waypoints with at least 2 [x,y] points"}
             try:
-                pts = [[float(p[0]), float(p[1])] for p in waypoints]
-            except (TypeError, ValueError, IndexError) as exc:
-                return {"success": False, "error": f"invalid waypoints: {exc}"}
-            resolved_pins = None
-            via_pts = None  # signals: already have pts, skip smart routing
+                from kicad_mcp.commands.connection_registry import add_connection
+                count = add_connection(sch_file, conn)
+            except Exception as exc:
+                logger.exception("connection_registry.add_connection failed")
+                return {"success": False, "error": str(exc)}
+            return {
+                "success":       True,
+                "queued":        True,
+                "connection":    conn,
+                "pending_count": count,
+                "schematic":     str(sch_file),
+                "note": "Connection queued. Call optimize_schematic to route all pending wires.",
+            }
 
-        def _manhattan(pts):
-            """Ensure all segments in pts are axis-aligned, inserting corners where needed."""
-            out = [pts[0]]
-            for a, b in zip(pts, pts[1:]):
-                if abs(a[0] - b[0]) > 1e-6 and abs(a[1] - b[1]) > 1e-6:
-                    # vertical-first: go to destination y first, then x
-                    out.append([a[0], b[1]])
-                out.append(b)
-            return out
+        # Coordinate-based mode (explicit waypoints) — draw immediately, unchanged
+        waypoints = params.get("waypoints") or []
+        if len(waypoints) < 2:
+            return {"success": False,
+                    "error": "Provide either fromRef/fromPin/toRef/toPin (queues for optimize), "
+                             "or waypoints with at least 2 [x,y] points (draws immediately)"}
+        try:
+            pts = [[float(p[0]), float(p[1])] for p in waypoints]
+        except (TypeError, ValueError, IndexError) as exc:
+            return {"success": False, "error": f"invalid waypoints: {exc}"}
 
-        _STUB = 5.08  # escape/approach stub in mm (2 KiCAD grid squares)
-
-        def _angle_dir(angle):
-            """Unit (dx,dy) exit vector. KiCAD: y increases downward on screen."""
-            if angle is None:
-                return (0, 0)
-            a = angle % 360
-            if abs(a) < 1:        return (1,  0)   # RIGHT
-            if abs(a - 90) < 1:   return (0, -1)   # UP   (y decreases)
-            if abs(a - 180) < 1:  return (-1, 0)   # LEFT
-            if abs(a - 270) < 1:  return (0,  1)   # DOWN (y increases)
-            return (0, 0)
-
-        def _route_pins(p1, p2, fa, ta):
-            """
-            Route from pin p1 (exit angle fa) to pin p2 (exit angle ta).
-            Always exits p1 in fa direction and approaches p2 from ta direction.
-            Uses a simple L-bend when possible, otherwise escape+approach stubs.
-            """
-            x1, y1 = p1[0], p1[1]
-            x2, y2 = p2[0], p2[1]
-
-            # Already axis-aligned — straight wire
-            if abs(x1 - x2) < 1e-4 or abs(y1 - y2) < 1e-4:
-                return [p1, p2]
-
-            fd = _angle_dir(fa)
-            td = _angle_dir(ta)
-
-            # --- Try simple L-bend (no extra stubs) ---
-            # When destination pin exits vertically, V-first arrives at pin y-level
-            # from the side — avoids H-first corner landing inside the component body.
-            if td[1] != 0:
-                v_ok = (fd == (0, 0) or fd[0] != 0
-                        or (fd[1] != 0 and (y2 - y1) * fd[1] > 0))
-                if v_ok:
-                    return [p1, [x1, y2], p2]
-
-            # H-first valid when: from exits H toward x2, and to exits V from correct side
-            h_from = fd[0] != 0 and (x2 - x1) * fd[0] > 0
-            h_to   = td == (0, 0) or (td[1] != 0 and (y2 - y1) * (-td[1]) > 0)
-            if h_from and h_to:
-                return [p1, [x2, y1], p2]
-
-            # V-first valid when: from exits V toward y2, and to exits H from correct side
-            v_from = fd[1] != 0 and (y2 - y1) * fd[1] > 0
-            v_to   = td == (0, 0) or (td[0] != 0 and (x2 - x1) * (-td[0]) > 0)
-            if v_from and v_to:
-                return [p1, [x1, y2], p2]
-
-            # --- Escape + approach: emit stub in each pin's exit direction ---
-            esc = [x1 + fd[0] * _STUB, y1 + fd[1] * _STUB] if fd != (0, 0) else [x1, y1]
-            app = [x2 + td[0] * _STUB, y2 + td[1] * _STUB] if td != (0, 0) else [x2, y2]
-
-            ex, ey = esc[0], esc[1]
-            ax, ay = app[0], app[1]
-
-            inner = []
-            if abs(ex - ax) > 1e-4 and abs(ey - ay) > 1e-4:
-                # Corner direction: match the escape axis so the first turn
-                # moves perpendicular to the escape stub, avoiding the source component.
-                if fd[1] != 0:    # escaping vertically → turn H first toward ax
-                    inner = [[ax, ey]]
-                else:              # escaping horizontally → turn V first toward ay
-                    inner = [[ex, ay]]
-
-            raw = [p1, esc] + inner + [app, p2]
-
-            # Deduplicate consecutive identical points
-            result = [raw[0]]
-            for pt in raw[1:]:
-                if abs(pt[0] - result[-1][0]) > 1e-4 or abs(pt[1] - result[-1][1]) > 1e-4:
-                    result.append(pt)
-            return result
-
-        if via_pts is None:
-            # Coordinate mode — pts already set, just enforce Manhattan
-            pts = _manhattan(pts)
-        elif via_pts:
-            # Ref mode with manual waypoints — enforce Manhattan
-            pts = _manhattan([start] + via_pts + [end])
-        else:
-            # Ref mode, no manual waypoints — direction-aware routing
-            x1, y1 = start[0], start[1]
-            x2, y2 = end[0], end[1]
-            if abs(x1 - x2) < 1e-4 or abs(y1 - y2) < 1e-4:
-                pts = [start, end]
-            else:
-                pts = _route_pins(start, end, from_angle, to_angle)
+        from kicad_mcp.commands.router import manhattan
+        pts = manhattan(pts)
 
         try:
             from kicad_mcp.commands.wire_manager import WireManager
@@ -956,12 +843,57 @@ class KiCADDispatcher:
             if not ok:
                 return {"success": False, "error": "WireManager add_wire returned False"}
             result: Dict = {"success": True, "waypoints": pts, "schematic": str(sch_file)}
-            if resolved_pins:
-                result["resolved_pins"] = resolved_pins
             result.update(try_reload(sch_file))
             return result
         except Exception as exc:
             logger.exception("add_schematic_wire failed")
+            return {"success": False, "error": str(exc)}
+
+    def _handle_optimize_schematic(self, params: Dict) -> Dict:
+        sch_file = self._resolve_sch_path(params)
+        if not sch_file:
+            return {"success": False, "error": "No schematic loaded."}
+        clear = params.get("clearPending", True)
+        try:
+            from kicad_mcp.commands.connection_registry import load_pending, clear_pending
+            from kicad_mcp.commands.router import route_all
+            from kicad_mcp.commands.wire_manager import WireManager
+            from kicad_mcp.commands.ipc_reload import try_reload
+
+            connections = load_pending(sch_file)
+            if not connections:
+                return {"success": True, "routed": 0, "skipped": 0,
+                        "note": "No pending connections to route.",
+                        "schematic": str(sch_file)}
+
+            routed_list = route_all(sch_file, connections)
+            routed = skipped = 0
+            for conn, pts in routed_list:
+                if pts is None:
+                    skipped += 1
+                    continue
+                if len(pts) == 2:
+                    ok = WireManager.add_wire(sch_file, pts[0], pts[1])
+                else:
+                    ok = WireManager.add_polyline_wire(sch_file, pts)
+                if ok:
+                    routed += 1
+                else:
+                    skipped += 1
+
+            if clear:
+                clear_pending(sch_file)
+
+            result: Dict = {
+                "success": True,
+                "routed":  routed,
+                "skipped": skipped,
+                "schematic": str(sch_file),
+            }
+            result.update(try_reload(sch_file))
+            return result
+        except Exception as exc:
+            logger.exception("optimize_schematic failed")
             return {"success": False, "error": str(exc)}
 
     def _handle_add_schematic_net_label(self, params: Dict) -> Dict:
